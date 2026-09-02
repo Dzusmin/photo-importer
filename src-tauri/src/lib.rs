@@ -4,6 +4,7 @@ use tauri::Manager;
 use importer_manifest::ImportManifest;
 
 mod background;
+mod backups;
 mod imports;
 mod scan_jobs;
 mod settings;
@@ -13,6 +14,11 @@ mod thumbnails;
 use background::{
     BackgroundService, acknowledge_pending_source, get_background_status,
     ignore_source_until_disconnect, refresh_background_monitor, start_source_workflow,
+};
+use backups::{
+    BackupService, cancel_backup_job, get_backup_job, list_backup_jobs, list_backup_targets,
+    pause_backup_job, prepare_backup_plan, recognize_backup_target, register_backup_target,
+    remove_backup_target, resume_backup_job, start_backup_job,
 };
 use imports::{
     ImportService, cancel_import_session, create_import_session, get_import_session,
@@ -72,6 +78,7 @@ pub fn run() {
             app.manage(background::NotificationRouteState::default());
             app.manage(ThumbnailService::new(app.path().app_cache_dir()?)?);
             let data_directory = app.path().app_data_dir()?;
+            app.manage(BackupService::new(&data_directory)?);
             let manifest = ImportManifest::open(data_directory.join("import-manifest.sqlite3"))?;
             app.manage(ImportService::new(manifest.clone()));
             app.manage(manifest);
@@ -135,6 +142,17 @@ pub fn run() {
             start_source_workflow,
             ignore_source_until_disconnect,
             list_source_workflows,
+            register_backup_target,
+            list_backup_targets,
+            recognize_backup_target,
+            remove_backup_target,
+            prepare_backup_plan,
+            start_backup_job,
+            get_backup_job,
+            list_backup_jobs,
+            pause_backup_job,
+            resume_backup_job,
+            cancel_backup_job,
         ])
         .build(tauri::generate_context!())
         .expect("failed to build Photo Importer");

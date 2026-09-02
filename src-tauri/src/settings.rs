@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use importer_domain::settings::PortableSettings;
 use importer_domain::{AppSettings, CURRENT_SETTINGS_SCHEMA_VERSION};
+use importer_media::{SourceDiscovery, SystemSourceDiscovery};
 use importer_settings::{
     JsonSettingsRepository, SettingsLoadSource, SettingsRepository, SettingsRepositoryError,
 };
@@ -262,7 +263,11 @@ pub(crate) fn save_settings(
     settings: AppSettings,
     app: tauri::AppHandle,
     service: tauri::State<'_, SettingsService>,
+    backups: tauri::State<'_, crate::backups::BackupService>,
 ) -> Result<SettingsResponse, SettingsCommandError> {
+    backups
+        .validate_source_roles(&settings, &SystemSourceDiscovery.discover())
+        .map_err(|error| SettingsCommandError::new(error.code, error.message))?;
     let response = service.save(&settings)?;
     crate::background::sync_autostart(&app, settings.local.start_at_login);
     Ok(response)

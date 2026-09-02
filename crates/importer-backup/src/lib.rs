@@ -45,7 +45,7 @@ pub struct BackupEngine {
     backup_root: PathBuf,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum BackupOperationKind {
     New,
@@ -53,7 +53,7 @@ pub enum BackupOperationKind {
     Repair,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupOperation {
     pub relative_path: PathBuf,
@@ -65,7 +65,7 @@ pub struct BackupOperation {
     pub previous_sha256: Option<String>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupPlan {
     pub target_id: Uuid,
@@ -82,6 +82,27 @@ pub struct BackupReport {
     pub unchanged_file_count: usize,
     pub versioned_file_count: usize,
     pub copied_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupPhase {
+    ScanningLibrary,
+    Hashing,
+    Copying,
+    Verifying,
+    Finalizing,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupProgress {
+    pub phase: BackupPhase,
+    pub processed_file_count: usize,
+    pub total_file_count: Option<usize>,
+    pub processed_bytes: u64,
+    pub total_bytes: Option<u64>,
+    pub current_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Error)]
@@ -122,6 +143,8 @@ pub enum BackupError {
     VerificationFailed(PathBuf),
     #[error("backup plan belongs to a different target")]
     WrongPlanTarget,
+    #[error("backup was cancelled")]
+    Cancelled,
     #[error("numeric value is too large for SQLite: {0}")]
     ValueTooLarge(u64),
 }
@@ -204,6 +227,37 @@ impl TargetRegistry {
         )?;
         let rows = statement.query_map([], target_from_row)?;
         rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    /// Recognizes a registered target from the persistent marker stored on the
+    /// currently mounted disk. Mount paths are deliberately not identities.
+    pub fn recognize(
+        &self,
+        current_root: impl Into<PathBuf>,
+    ) -> Result<Option<BackupEngine>, BackupError> {
+        let current_root = current_root.into();
+        if !current_root.is_dir() {
+            return Err(BackupError::InvalidTargetRoot(current_root));
+        }
+        let marker_path = technical_root(&current_root).join(MARKER_FILE);
+        if !marker_path.exists() {
+            return Ok(None);
+        }
+        let marker = read_marker(&marker_path)?;
+        if self.get(marker.target_id)?.is_none() {
+            return Ok(None);
+        }
+        self.connect(marker.target_id, current_root).map(Some)
+    }
+
+    /// Removes only the local configuration. Backup data and the persistent
+    /// disk marker remain intact, so the medium can be registered again.
+    pub fn remove(&self, target_id: Uuid) -> Result<bool, BackupError> {
+        let deleted = self.connection()?.execute(
+            "DELETE FROM backup_targets WHERE id = ?1",
+            [target_id.to_string()],
+        )?;
+        Ok(deleted != 0)
     }
 
     /// Opens a registered target at its current mount point. This identity check
@@ -303,35 +357,75 @@ impl BackupEngine {
     }
 
     pub fn plan(&self, source_root: impl Into<PathBuf>) -> Result<BackupPlan, BackupError> {
+        self.plan_with_progress(source_root, |_| {}, || false)
+    }
+
+    pub fn plan_with_progress(
+        &self,
+        source_root: impl Into<PathBuf>,
+        mut on_progress: impl FnMut(BackupProgress),
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<BackupPlan, BackupError> {
         let source_root = source_root.into();
         if !source_root.is_dir() {
             return Err(BackupError::InvalidSourceRoot(source_root));
         }
         reject_overlapping_roots(&source_root, &self.target_root)?;
-        let connection = Connection::open(manifest_path(&self.target_root))?;
-        let mut operations = Vec::new();
-        let mut unchanged_file_count = 0;
-        let mut total_copy_bytes = 0_u64;
+        let mut files = Vec::new();
+        let mut scanned_bytes = 0_u64;
         for entry in WalkDir::new(&source_root).follow_links(false) {
+            if is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
             let entry = entry?;
             if !entry.file_type().is_file() {
                 continue;
             }
-            let relative_path = entry
-                .path()
+            let size_bytes = entry.metadata()?.len();
+            scanned_bytes = scanned_bytes.saturating_add(size_bytes);
+            files.push((entry.path().to_path_buf(), size_bytes));
+            on_progress(BackupProgress {
+                phase: BackupPhase::ScanningLibrary,
+                processed_file_count: files.len(),
+                total_file_count: None,
+                processed_bytes: scanned_bytes,
+                total_bytes: None,
+                current_path: Some(entry.path().to_path_buf()),
+            });
+        }
+
+        let connection = Connection::open(manifest_path(&self.target_root))?;
+        let mut operations = Vec::new();
+        let mut unchanged_file_count = 0;
+        let mut total_copy_bytes = 0_u64;
+        let total_file_count = files.len();
+        let mut hashed_bytes = 0_u64;
+        for (index, (source_path, size_bytes)) in files.into_iter().enumerate() {
+            if is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
+            let relative_path = source_path
                 .strip_prefix(&source_root)
-                .map_err(|_| BackupError::UnsafeRelativePath(entry.path().to_path_buf()))?
+                .map_err(|_| BackupError::UnsafeRelativePath(source_path.clone()))?
                 .to_path_buf();
             validate_relative(&relative_path)?;
-            let source_sha256 = hash_file(entry.path())?;
-            let size_bytes = entry.metadata()?.len();
+            let source_sha256 = hash_file_with_cancel(&source_path, &mut is_cancelled)?;
             let previous = current_record(&connection, &relative_path)?;
             let destination_path = self.photos_root().join(&relative_path);
             let destination_hash = if destination_path.is_file() {
-                Some(hash_file(&destination_path)?)
+                Some(hash_file_with_cancel(&destination_path, &mut is_cancelled)?)
             } else {
                 None
             };
+            hashed_bytes = hashed_bytes.saturating_add(size_bytes);
+            on_progress(BackupProgress {
+                phase: BackupPhase::Hashing,
+                processed_file_count: index + 1,
+                total_file_count: Some(total_file_count),
+                processed_bytes: hashed_bytes,
+                total_bytes: Some(scanned_bytes),
+                current_path: Some(source_path.clone()),
+            });
             if previous.as_ref().map(|record| record.0.as_str()) == Some(&source_sha256)
                 && destination_hash.as_deref() == Some(&source_sha256)
             {
@@ -350,7 +444,7 @@ impl BackupEngine {
             total_copy_bytes = total_copy_bytes.saturating_add(size_bytes);
             operations.push(BackupOperation {
                 relative_path,
-                source_path: entry.path().to_path_buf(),
+                source_path,
                 destination_path,
                 kind,
                 size_bytes,
@@ -369,6 +463,16 @@ impl BackupEngine {
     }
 
     pub fn execute(&self, plan: &BackupPlan) -> Result<BackupReport, BackupError> {
+        self.execute_with_progress(plan, |_| {}, || true, || false)
+    }
+
+    pub fn execute_with_progress(
+        &self,
+        plan: &BackupPlan,
+        mut on_progress: impl FnMut(BackupProgress),
+        mut wait_between_files: impl FnMut() -> bool,
+        mut is_cancelled: impl FnMut() -> bool,
+    ) -> Result<BackupReport, BackupError> {
         if plan.target_id != self.target.id {
             return Err(BackupError::WrongPlanTarget);
         }
@@ -378,10 +482,16 @@ impl BackupEngine {
             versioned_file_count: 0,
             copied_bytes: 0,
         };
+        cleanup_staging(&self.technical_root().join("staging"))?;
         let mut connection = Connection::open(manifest_path(&self.target_root))?;
+        let total_file_count = plan.operations.len();
         for operation in &plan.operations {
+            if !wait_between_files() || is_cancelled() {
+                return Err(BackupError::Cancelled);
+            }
             validate_relative(&operation.relative_path)?;
-            if hash_file(&operation.source_path)? != operation.source_sha256
+            if hash_file_with_cancel(&operation.source_path, &mut is_cancelled)?
+                != operation.source_sha256
                 || fs::metadata(&operation.source_path)
                     .map_err(|source| io_error(&operation.source_path, source))?
                     .len()
@@ -405,11 +515,47 @@ impl BackupEngine {
             let staging = self.technical_root().join("staging");
             create_dir_all(&staging)?;
             let temporary = staging.join(format!("{}.partial", Uuid::new_v4()));
-            if let Err(error) = copy_and_sync(&operation.source_path, &temporary) {
+            let copied_before = report.copied_bytes;
+            if let Err(error) = copy_and_sync_with_progress(
+                &operation.source_path,
+                &temporary,
+                |file_bytes| {
+                    on_progress(BackupProgress {
+                        phase: BackupPhase::Copying,
+                        processed_file_count: report.copied_file_count,
+                        total_file_count: Some(total_file_count),
+                        processed_bytes: copied_before.saturating_add(file_bytes),
+                        total_bytes: Some(plan.total_copy_bytes),
+                        current_path: Some(operation.relative_path.clone()),
+                    });
+                },
+                &mut is_cancelled,
+            ) {
                 let _ = fs::remove_file(&temporary);
                 return Err(error);
             }
-            if hash_file(&temporary)? != operation.source_sha256 {
+            let verified = hash_file_with_progress(
+                &temporary,
+                |file_bytes| {
+                    on_progress(BackupProgress {
+                        phase: BackupPhase::Verifying,
+                        processed_file_count: report.copied_file_count,
+                        total_file_count: Some(total_file_count),
+                        processed_bytes: copied_before.saturating_add(file_bytes),
+                        total_bytes: Some(plan.total_copy_bytes),
+                        current_path: Some(operation.relative_path.clone()),
+                    });
+                },
+                &mut is_cancelled,
+            );
+            let verified = match verified {
+                Ok(hash) => hash,
+                Err(error) => {
+                    let _ = fs::remove_file(&temporary);
+                    return Err(error);
+                }
+            };
+            if verified != operation.source_sha256 {
                 let _ = fs::remove_file(&temporary);
                 return Err(BackupError::VerificationFailed(
                     operation.destination_path.clone(),
@@ -479,7 +625,23 @@ impl BackupEngine {
             if version_path.is_some() {
                 report.versioned_file_count += 1;
             }
+            on_progress(BackupProgress {
+                phase: BackupPhase::Verifying,
+                processed_file_count: report.copied_file_count,
+                total_file_count: Some(total_file_count),
+                processed_bytes: report.copied_bytes,
+                total_bytes: Some(plan.total_copy_bytes),
+                current_path: None,
+            });
         }
+        on_progress(BackupProgress {
+            phase: BackupPhase::Finalizing,
+            processed_file_count: report.copied_file_count,
+            total_file_count: Some(total_file_count),
+            processed_bytes: report.copied_bytes,
+            total_bytes: Some(plan.total_copy_bytes),
+            current_path: None,
+        });
         Ok(report)
     }
 
@@ -540,11 +702,30 @@ fn current_record(
 }
 
 fn hash_file(path: &Path) -> Result<String, BackupError> {
+    hash_file_with_cancel(path, || false)
+}
+
+fn hash_file_with_cancel(
+    path: &Path,
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<String, BackupError> {
+    hash_file_with_progress(path, |_| {}, &mut is_cancelled)
+}
+
+fn hash_file_with_progress(
+    path: &Path,
+    mut on_progress: impl FnMut(u64),
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<String, BackupError> {
     let file = File::open(path).map_err(|source| io_error(path, source))?;
     let mut reader = BufReader::with_capacity(1024 * 1024, file);
     let mut hasher = Sha256::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut processed = 0_u64;
     loop {
+        if is_cancelled() {
+            return Err(BackupError::Cancelled);
+        }
         let read = reader
             .read(&mut buffer)
             .map_err(|source| io_error(path, source))?;
@@ -552,11 +733,18 @@ fn hash_file(path: &Path) -> Result<String, BackupError> {
             break;
         }
         hasher.update(&buffer[..read]);
+        processed = processed.saturating_add(read as u64);
+        on_progress(processed);
     }
     Ok(format!("{:x}", hasher.finalize()))
 }
 
-fn copy_and_sync(source: &Path, destination: &Path) -> Result<(), BackupError> {
+fn copy_and_sync_with_progress(
+    source: &Path,
+    destination: &Path,
+    mut on_progress: impl FnMut(u64),
+    mut is_cancelled: impl FnMut() -> bool,
+) -> Result<(), BackupError> {
     let input = File::open(source).map_err(|error| io_error(source, error))?;
     let output = OpenOptions::new()
         .write(true)
@@ -565,7 +753,24 @@ fn copy_and_sync(source: &Path, destination: &Path) -> Result<(), BackupError> {
         .map_err(|error| io_error(destination, error))?;
     let mut reader = BufReader::with_capacity(1024 * 1024, input);
     let mut writer = BufWriter::with_capacity(1024 * 1024, output);
-    io::copy(&mut reader, &mut writer).map_err(|error| io_error(destination, error))?;
+    let mut buffer = vec![0_u8; 1024 * 1024];
+    let mut copied = 0_u64;
+    loop {
+        if is_cancelled() {
+            return Err(BackupError::Cancelled);
+        }
+        let read = reader
+            .read(&mut buffer)
+            .map_err(|error| io_error(source, error))?;
+        if read == 0 {
+            break;
+        }
+        writer
+            .write_all(&buffer[..read])
+            .map_err(|error| io_error(destination, error))?;
+        copied = copied.saturating_add(read as u64);
+        on_progress(copied);
+    }
     writer
         .flush()
         .map_err(|error| io_error(destination, error))?;
@@ -655,6 +860,23 @@ fn manifest_path(root: &Path) -> PathBuf {
 
 fn create_dir_all(path: &Path) -> Result<(), BackupError> {
     fs::create_dir_all(path).map_err(|source| io_error(path, source))
+}
+
+fn cleanup_staging(path: &Path) -> Result<(), BackupError> {
+    if !path.exists() {
+        return Ok(());
+    }
+    let entries = fs::read_dir(path).map_err(|source| io_error(path, source))?;
+    for entry in entries {
+        let entry = entry.map_err(|source| io_error(path, source))?;
+        let entry_path = entry.path();
+        if entry_path.is_file()
+            && entry_path.extension().and_then(|value| value.to_str()) == Some("partial")
+        {
+            fs::remove_file(&entry_path).map_err(|source| io_error(&entry_path, source))?;
+        }
+    }
+    Ok(())
 }
 
 fn io_error(path: &Path, source: io::Error) -> BackupError {

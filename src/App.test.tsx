@@ -18,6 +18,9 @@ vi.mock("./features/sources/SourceScanner", () => ({
 vi.mock("./features/settings/SettingsPanel", () => ({
   SettingsPanel: () => <div>settings-test</div>,
 }));
+vi.mock("./features/backups/BackupPanel", () => ({
+  BackupPanel: () => <div>backup-test</div>,
+}));
 
 describe("App", () => {
   beforeEach(() => getSystemStatus.mockReset());
@@ -33,8 +36,10 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByText("Backend działa")).toBeInTheDocument();
+    expect(await screen.findByText("Gotowa")).toBeInTheDocument();
     expect(screen.getByText("scanner-test")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Backup" }));
+    expect(screen.getByText("backup-test")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Ustawienia" }));
     expect(screen.getByText("settings-test")).toBeInTheDocument();
     expect(screen.queryByText("scanner-test")).not.toBeInTheDocument();

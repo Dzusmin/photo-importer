@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import {
@@ -47,15 +47,29 @@ interface CameraProfileDraft {
   itemCount: number;
 }
 import { requestThumbnail } from "../../shared/thumbnailManager";
+import {
+  describeOperationalError,
+  type AppStatus,
+} from "../../shared/appStatus";
+import { ErrorNotice } from "../../shared/ErrorNotice";
 
-export function SourceScanner() {
+const ignoreHealthChange = () => undefined;
+
+export function SourceScanner({
+  appStatus = "ready",
+  onHealthChange = ignoreHealthChange,
+}: {
+  appStatus?: AppStatus;
+  onHealthChange?: (healthy: boolean) => void;
+} = {}) {
   const [sources, setSources] = useState<SourceVolume[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [scanningPath, setScanningPath] = useState<string | null>(null);
   const [scanJob, setScanJob] = useState<MediaScanJob | null>(null);
   const [scanResult, setScanResult] = useState<SourceScanResponse | null>(null);
   const [message, setMessage] = useState<string | null>(null);
-  const [discoveryError, setDiscoveryError] = useState(false);
+  const [discoveryError, setDiscoveryError] = useState<unknown>(null);
+  const [discoveryComplete, setDiscoveryComplete] = useState(false);
   const [profileDrafts, setProfileDrafts] = useState<
     CameraProfileDraft[] | null
   >(null);
@@ -301,26 +315,38 @@ export function SourceScanner() {
     };
   }, []);
 
-  useEffect(() => {
-    let active = true;
-    async function refresh() {
-      try {
-        const discovered = await listMediaSources();
-        if (active) {
-          setSources(discovered);
-          setDiscoveryError(false);
-        }
-      } catch {
-        if (active) setDiscoveryError(true);
-      }
+  const refreshSources = useCallback(async () => {
+    try {
+      const discovered = await listMediaSources();
+      setSources(discovered);
+      setDiscoveryError(null);
+      setDiscoveryComplete(true);
+      onHealthChange(true);
+    } catch (error) {
+      setSources([]);
+      setDiscoveryError(error);
+      setDiscoveryComplete(false);
+      onHealthChange(false);
     }
+  }, [onHealthChange]);
+
+  useEffect(() => {
+    if (appStatus === "connecting" || appStatus === "error") {
+      setSources([]);
+      setDiscoveryComplete(false);
+      return;
+    }
+    let active = true;
+    const refresh = async () => {
+      if (active) await refreshSources();
+    };
     void refresh();
     const timer = window.setInterval(() => void refresh(), 5_000);
     return () => {
       active = false;
       window.clearInterval(timer);
     };
-  }, []);
+  }, [appStatus === "connecting" || appStatus === "error", refreshSources]);
 
   async function runScan(path: string, initialMessage?: string) {
     setScanningPath(path);
@@ -765,9 +791,13 @@ export function SourceScanner() {
         <div>
           <p className="section-label">ŹRÓDŁA MEDIÓW</p>
           <h2>
-            {cameraSources.length > 0
-              ? "Wykryto nośnik aparatu."
-              : "Czekam na kartę pamięci."}
+            {!discoveryComplete
+              ? appStatus === "error"
+                ? "Źródła są niedostępne."
+                : "Sprawdzam dostępne źródła…"
+              : cameraSources.length > 0
+                ? "Wykryto nośnik aparatu."
+                : "Czekam na kartę pamięci."}
           </h2>
           <p>
             Lista odświeża się co 5 sekund. Możesz też przeskanować dowolny
@@ -776,7 +806,11 @@ export function SourceScanner() {
           <button
             type="button"
             onClick={() => void chooseDirectory()}
-            disabled={scanningPath !== null}
+            disabled={
+              scanningPath !== null ||
+              appStatus === "connecting" ||
+              appStatus === "error"
+            }
           >
             Wybierz katalog ręcznie
           </button>
@@ -787,15 +821,30 @@ export function SourceScanner() {
           )}
         </div>
         <div className="source-hero__status">
-          <span className="source-count">{cameraSources.length}</span>
-          <strong>prawdopodobnych źródeł aparatu</strong>
+          <span className="source-count">
+            {discoveryComplete ? cameraSources.length : "—"}
+          </span>
+          <strong>
+            {discoveryComplete
+              ? "prawdopodobnych źródeł aparatu"
+              : "liczba źródeł jest nieznana"}
+          </strong>
           <span>
             {discoveryError
-              ? "Nie udało się odświeżyć listy"
-              : "Monitor aktywny"}
+              ? "Odczyt źródeł nie powiódł się"
+              : discoveryComplete
+                ? "Lista źródeł jest aktualna"
+                : "Oczekiwanie na potwierdzenie"}
           </span>
         </div>
       </section>
+
+      {discoveryError !== null && (
+        <ErrorNotice
+          error={describeOperationalError(discoveryError, "read")}
+          onRetry={() => void refreshSources()}
+        />
+      )}
 
       {pendingWorkflows.length > 0 && (
         <section className="source-list" aria-label="Trwałe zadania kart">

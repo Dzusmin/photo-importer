@@ -5,15 +5,11 @@ export interface SystemStatus {
   appVersion: string;
   operatingSystem: string;
   architecture: string;
-  backendStatus: "ready";
+  backendStatus: "ready" | "degraded" | "error";
 }
 
-export async function getSystemStatus(): Promise<SystemStatus | null> {
-  try {
-    return await invoke<SystemStatus>("get_system_status");
-  } catch {
-    return null;
-  }
+export function getSystemStatus(): Promise<SystemStatus | null> {
+  return invoke<SystemStatus>("get_system_status");
 }
 
 export function describeSystem(status: SystemStatus): string {

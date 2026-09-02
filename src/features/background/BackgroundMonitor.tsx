@@ -9,27 +9,68 @@ import {
   ignoreSourceUntilDisconnect,
   type BackgroundStatus,
 } from "../../shared/background";
+import {
+  describeOperationalError,
+  type AppStatus,
+} from "../../shared/appStatus";
+import { ErrorNotice } from "../../shared/ErrorNotice";
 
-export function BackgroundMonitor() {
+const ignoreHealthChange = () => undefined;
+
+export function BackgroundMonitor({
+  appStatus = "ready",
+  onHealthChange = ignoreHealthChange,
+}: {
+  appStatus?: AppStatus;
+  onHealthChange?: (healthy: boolean) => void;
+} = {}) {
   const [status, setStatus] = useState<BackgroundStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
+  const [loadError, setLoadError] = useState<unknown>(null);
 
   useEffect(() => {
+    if (appStatus === "connecting" || appStatus === "error") {
+      setStatus(null);
+      return;
+    }
     let active = true;
-    void getBackgroundStatus().then((value) => active && setStatus(value));
+    void getBackgroundStatus()
+      .then((value) => {
+        if (!active) return;
+        setStatus(value);
+        setLoadError(null);
+        onHealthChange(value.running && !value.lastError);
+      })
+      .catch((error) => {
+        if (!active) return;
+        setStatus(null);
+        setLoadError(error);
+        onHealthChange(false);
+      });
     const unlisten = listen<BackgroundStatus>("background-status", (event) => {
-      if (active) setStatus(event.payload);
+      if (active) {
+        setStatus(event.payload);
+        setLoadError(null);
+        onHealthChange(event.payload.running && !event.payload.lastError);
+      }
     });
     return () => {
       active = false;
       void unlisten.then((stop) => stop());
     };
-  }, []);
+  }, [appStatus === "connecting" || appStatus === "error", onHealthChange]);
 
   async function refresh() {
     setRefreshing(true);
     try {
-      setStatus(await refreshBackgroundMonitor());
+      const value = await refreshBackgroundMonitor();
+      setStatus(value);
+      setLoadError(null);
+      onHealthChange(value.running && !value.lastError);
+    } catch (error) {
+      setStatus(null);
+      setLoadError(error);
+      onHealthChange(false);
     } finally {
       window.setTimeout(() => setRefreshing(false), 500);
     }
@@ -44,9 +85,19 @@ export function BackgroundMonitor() {
         <div>
           <p className="section-label">AUTOMAT W TLE</p>
           <strong>
-            {status?.activeAutoScanCount
-              ? `Skanowanie ${status.activeAutoScanCount} źródła`
-              : "Monitor nośników działa"}
+            {appStatus === "connecting"
+              ? "Łączenie…"
+              : appStatus === "error"
+                ? "Monitor niedostępny"
+                : status?.activeAutoScanCount
+                  ? `Skanowanie ${status.activeAutoScanCount} źródła`
+                  : status?.running && status.lastError
+                    ? "Monitor działa z ograniczeniami"
+                    : status?.running
+                      ? "Monitor nośników działa"
+                      : status
+                        ? "Monitor jest zatrzymany"
+                        : "Sprawdzanie monitora…"}
           </strong>
           <small>
             {status
@@ -62,14 +113,25 @@ export function BackgroundMonitor() {
         <button
           type="button"
           className="secondary"
-          disabled={refreshing}
+          disabled={
+            refreshing || appStatus === "connecting" || appStatus === "error"
+          }
           onClick={() => void refresh()}
         >
           {refreshing ? "Sprawdzanie…" : "Sprawdź teraz"}
         </button>
       </div>
+      {loadError !== null && (
+        <ErrorNotice
+          error={describeOperationalError(loadError, "read")}
+          onRetry={() => void refresh()}
+        />
+      )}
       {status?.lastError && (
-        <p className="background-monitor__error">{status.lastError}</p>
+        <ErrorNotice
+          error={describeOperationalError(status.lastError, "read")}
+          onRetry={() => void refresh()}
+        />
       )}
       {status?.pendingSources.map((source) => (
         <div className="background-monitor__event" key={source.fingerprint}>

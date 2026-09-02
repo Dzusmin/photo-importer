@@ -1,7 +1,9 @@
+use std::cell::{Cell, RefCell};
 use std::fs;
 
 use importer_backup::{
-    BACKUP_DIRECTORY, BackupOperationKind, PHOTOS_DIRECTORY, TECHNICAL_DIRECTORY, TargetRegistry,
+    BACKUP_DIRECTORY, BackupError, BackupOperationKind, BackupPhase, PHOTOS_DIRECTORY,
+    TECHNICAL_DIRECTORY, TargetRegistry,
 };
 
 fn setup() -> (
@@ -143,4 +145,111 @@ fn refuses_recursive_backup_into_the_source_tree() {
     let target = registry.register(&disk, "bad placement").unwrap();
     let engine = registry.connect(target.id, disk).unwrap();
     assert!(engine.plan(source).is_err());
+}
+
+#[test]
+fn planning_reports_indeterminate_scan_then_determinate_hashing() {
+    let (directory, registry, target) = setup();
+    let source = directory.path().join("library");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("a.jpg"), b"one").unwrap();
+    fs::write(source.join("b.jpg"), b"twenty").unwrap();
+    let engine = registry
+        .connect(target.id, directory.path().join("disk"))
+        .unwrap();
+    let progress = RefCell::new(Vec::new());
+
+    let plan = engine
+        .plan_with_progress(
+            &source,
+            |update| progress.borrow_mut().push(update),
+            || false,
+        )
+        .unwrap();
+
+    assert_eq!(plan.operations.len(), 2);
+    let progress = progress.into_inner();
+    assert!(progress.iter().any(|update| {
+        update.phase == BackupPhase::ScanningLibrary && update.total_file_count.is_none()
+    }));
+    let final_hash = progress
+        .iter()
+        .rev()
+        .find(|update| update.phase == BackupPhase::Hashing)
+        .unwrap();
+    assert_eq!(final_hash.processed_file_count, 2);
+    assert_eq!(final_hash.total_file_count, Some(2));
+    assert_eq!(final_hash.processed_bytes, final_hash.total_bytes.unwrap());
+}
+
+#[test]
+fn cancellation_keeps_completed_files_and_removes_partial_files() {
+    let (directory, registry, target) = setup();
+    let source = directory.path().join("library");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("a.jpg"), b"complete first").unwrap();
+    fs::write(source.join("b.jpg"), vec![7_u8; 2 * 1024 * 1024]).unwrap();
+    let engine = registry
+        .connect(target.id, directory.path().join("disk"))
+        .unwrap();
+    let plan = engine.plan(&source).unwrap();
+    let cancel = Cell::new(false);
+    let staging = engine.technical_root().join("staging");
+    fs::create_dir_all(&staging).unwrap();
+    fs::write(staging.join("orphan.partial"), b"incomplete").unwrap();
+
+    let result = engine.execute_with_progress(
+        &plan,
+        |update| {
+            if update.processed_file_count == 1 {
+                cancel.set(true);
+            }
+        },
+        || true,
+        || cancel.get(),
+    );
+
+    assert!(matches!(result, Err(BackupError::Cancelled)));
+    assert_eq!(
+        fs::read(engine.photos_root().join("a.jpg")).unwrap(),
+        b"complete first"
+    );
+    assert!(!engine.photos_root().join("b.jpg").exists());
+    assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+    let resumed = engine.plan(&source).unwrap();
+    assert_eq!(resumed.unchanged_file_count, 1);
+    assert_eq!(resumed.operations.len(), 1);
+}
+
+#[test]
+fn cancellation_inside_a_large_copy_cleans_the_temporary_file() {
+    let (directory, registry, target) = setup();
+    let source = directory.path().join("library");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("large.raw"), vec![3_u8; 3 * 1024 * 1024]).unwrap();
+    let engine = registry
+        .connect(target.id, directory.path().join("disk"))
+        .unwrap();
+    let plan = engine.plan(&source).unwrap();
+    let cancel = Cell::new(false);
+
+    let result = engine.execute_with_progress(
+        &plan,
+        |update| {
+            if update.phase == BackupPhase::Copying && update.processed_bytes > 0 {
+                cancel.set(true);
+            }
+        },
+        || true,
+        || cancel.get(),
+    );
+
+    assert!(matches!(result, Err(BackupError::Cancelled)));
+    assert!(!engine.photos_root().join("large.raw").exists());
+    assert_eq!(
+        fs::read_dir(engine.technical_root().join("staging"))
+            .unwrap()
+            .count(),
+        0
+    );
 }

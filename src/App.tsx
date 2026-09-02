@@ -1,38 +1,88 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { getSystemStatus, type SystemStatus } from "./shared/systemStatus";
 import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { SourceScanner } from "./features/sources/SourceScanner";
 import { BackgroundMonitor } from "./features/background/BackgroundMonitor";
+import { BackupPanel } from "./features/backups/BackupPanel";
+import {
+  APP_STATUS_LABELS,
+  describeOperationalError,
+  type AppStatus,
+} from "./shared/appStatus";
+import { ErrorNotice } from "./shared/ErrorNotice";
 import "./App.css";
-
-type LoadingState = "loading" | "ready" | "error";
 
 function App() {
   const [status, setStatus] = useState<SystemStatus | null>(null);
-  const [loadingState, setLoadingState] = useState<LoadingState>("loading");
-  const [activeView, setActiveView] = useState<"home" | "settings">("home");
+  const [connectionState, setConnectionState] =
+    useState<AppStatus>("connecting");
+  const [connectionError, setConnectionError] = useState<unknown>(null);
+  const [subsystems, setSubsystems] = useState({
+    monitor: true,
+    scanner: true,
+  });
+  const [activeView, setActiveView] = useState<"home" | "backup" | "settings">(
+    "home",
+  );
+
+  const loadSystemStatus = useCallback(async () => {
+    setConnectionState("connecting");
+    setConnectionError(null);
+    try {
+      const systemStatus = await getSystemStatus();
+      if (!systemStatus) {
+        throw {
+          code: "backendUnavailable",
+          message: "get_system_status returned null",
+        };
+      }
+      setStatus(systemStatus);
+      setConnectionState(systemStatus.backendStatus);
+    } catch (error) {
+      setStatus(null);
+      setConnectionError(error);
+      setConnectionState("error");
+    }
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
-    const loadSystemStatus = async () => {
+    const load = async () => {
       try {
         const systemStatus = await getSystemStatus();
         if (cancelled) return;
         if (!systemStatus) {
-          setLoadingState("error");
-          return;
+          throw {
+            code: "backendUnavailable",
+            message: "get_system_status returned null",
+          };
         }
         setStatus(systemStatus);
-        setLoadingState("ready");
-      } catch {
-        if (!cancelled) setLoadingState("error");
+        setConnectionState(systemStatus.backendStatus);
+      } catch (error) {
+        if (!cancelled) {
+          setConnectionError(error);
+          setConnectionState("error");
+        }
       }
     };
-    void loadSystemStatus();
+    void load();
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const appStatus = useMemo<AppStatus>(() => {
+    if (connectionState !== "ready") return connectionState;
+    return subsystems.monitor && subsystems.scanner ? "ready" : "degraded";
+  }, [connectionState, subsystems]);
+
+  const reportMonitorHealth = useCallback((healthy: boolean) => {
+    setSubsystems((current) => ({ ...current, monitor: healthy }));
+  }, []);
+  const reportScannerHealth = useCallback((healthy: boolean) => {
+    setSubsystems((current) => ({ ...current, scanner: healthy }));
   }, []);
 
   useEffect(() => {
@@ -62,13 +112,22 @@ function App() {
           <p className="eyebrow">PHOTO IMPORTER</p>
           <h1>Twoje zdjęcia, bezpiecznie na miejscu.</h1>
         </div>
-        <span className={`health health--${loadingState}`}>
+        <span className={`health health--${appStatus}`} role="status">
           <span className="health__dot" />
-          {loadingState === "ready" && "Backend działa"}
-          {loadingState === "loading" && "Łączenie…"}
-          {loadingState === "error" && "Brak połączenia"}
+          {APP_STATUS_LABELS[appStatus]}
         </span>
       </header>
+
+      {appStatus === "error" && (
+        <ErrorNotice
+          error={describeOperationalError(
+            connectionError ?? { code: "backendUnavailable" },
+            "backend",
+          )}
+          onRetry={() => void loadSystemStatus()}
+          retryLabel="Połącz ponownie"
+        />
+      )}
 
       <nav className="main-nav" aria-label="Główna nawigacja">
         <button
@@ -77,6 +136,13 @@ function App() {
           onClick={() => setActiveView("home")}
         >
           Start
+        </button>
+        <button
+          type="button"
+          className={activeView === "backup" ? "main-nav__active" : undefined}
+          onClick={() => setActiveView("backup")}
+        >
+          Backup
         </button>
         <button
           type="button"
@@ -89,10 +155,18 @@ function App() {
 
       {activeView === "settings" ? (
         <SettingsPanel />
+      ) : activeView === "backup" ? (
+        <BackupPanel />
       ) : (
         <>
-          <BackgroundMonitor />
-          <SourceScanner />
+          <BackgroundMonitor
+            appStatus={appStatus}
+            onHealthChange={reportMonitorHealth}
+          />
+          <SourceScanner
+            appStatus={appStatus}
+            onHealthChange={reportScannerHealth}
+          />
 
           <section className="diagnostics" aria-label="Diagnostyka aplikacji">
             <Diagnostic label="Produkt" value={status?.productName ?? "—"} />

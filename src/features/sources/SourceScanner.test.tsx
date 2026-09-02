@@ -38,6 +38,41 @@ async function emit(name: string, payload: unknown) {
 
 describe("SourceScanner", () => {
   beforeEach(() => eventBus.clear());
+
+  it("shows an unknown count after a read error and lets the user retry", async () => {
+    let attempts = 0;
+    const healthChanged = vi.fn();
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") {
+        attempts += 1;
+        if (attempts === 1)
+          throw new Error("Access denied to removable drives");
+        return [];
+      }
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner onHealthChange={healthChanged} />);
+
+    expect(await screen.findByText("Brak uprawnień")).toBeInTheDocument();
+    expect(screen.getByText("—")).toBeInTheDocument();
+    expect(screen.getByText("liczba źródeł jest nieznana")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Spróbuj ponownie" }));
+
+    expect(
+      await screen.findByText("Czekam na kartę pamięci."),
+    ).toBeInTheDocument();
+    expect(screen.getByText("0")).toBeInTheDocument();
+    expect(healthChanged).toHaveBeenCalledWith(false);
+    expect(healthChanged).toHaveBeenLastCalledWith(true);
+  });
+
   it("discovers a card, reports scan progress, cancels and accepts completion", async () => {
     const cancelled = vi.fn();
     mockIPC((command) => {

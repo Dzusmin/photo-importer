@@ -1,6 +1,8 @@
 import { useEffect, useMemo, useState } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { clearThumbnailCache } from "../../shared/sources";
+import { describeOperationalError } from "../../shared/appStatus";
+import { ErrorNotice } from "../../shared/ErrorNotice";
 import {
   exportPortableSettings,
   importPortableSettings,
@@ -175,7 +177,14 @@ export function SettingsPanel() {
     return (
       <section className="settings-empty" aria-live="polite">
         <p>{busy ? "Wczytywanie ustawień…" : "Nie można wczytać ustawień."}</p>
-        {notice && <NoticeView notice={notice} />}
+        {loadError ? (
+          <ErrorNotice
+            error={describeOperationalError(loadError, "settings")}
+            onRetry={() => void reload()}
+          />
+        ) : (
+          notice && <NoticeView notice={notice} />
+        )}
         <div className="button-row">
           <button type="button" onClick={() => void reload()} disabled={busy}>
             Spróbuj ponownie

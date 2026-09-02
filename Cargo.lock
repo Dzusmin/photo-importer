@@ -3446,6 +3446,7 @@ version = "0.1.0"
 dependencies = [
  "image",
  "importer-background",
+ "importer-backup",
  "importer-domain",
  "importer-import",
  "importer-manifest",
