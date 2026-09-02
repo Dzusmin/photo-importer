@@ -1,0 +1,63 @@
+# Dependencies and build outputs
+node_modules/
+dist/
+dist-ssr/
+build/
+out/
+coverage/
+target/
+src-tauri/target/
+*.tsbuildinfo
+
+# Tool caches
+.cache/
+.eslintcache
+.parcel-cache/
+.turbo/
+.vite/
+
+# Logs and diagnostics
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+*.pid
+*.pid.lock
+
+# Local configuration and secrets
+.env
+.env.*
+!.env.example
+*.local
+
+# Local application state
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.partial
+
+# Temporary files
+tmp/
+temp/
+*.bak
+*.tmp
+*.temp
+
+# Editor and operating-system files
+.vscode/*
+!.vscode/extensions.json
+.idea/
+.DS_Store
+Thumbs.db
+Desktop.ini
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?

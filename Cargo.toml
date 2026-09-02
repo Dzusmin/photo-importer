@@ -1,0 +1,56 @@
+[workspace]
+members = [
+  "crates/importer-backup",
+  "crates/importer-background",
+  "crates/importer-domain",
+  "crates/importer-import",
+  "crates/importer-manifest",
+  "crates/importer-media",
+  "crates/importer-plan",
+  "crates/importer-settings",
+  "crates/importer-thumbnails",
+  "src-tauri",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2024"
+rust-version = "1.98"
+
+[workspace.dependencies]
+chrono = "0.4"
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp"] }
+jpeg-decoder = "0.3"
+rawler = "0.8.0"
+schemars = "1.2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+sysinfo = "0.39"
+nom-exif = "3"
+rusqlite = { version = "0.40", features = ["bundled"] }
+thiserror = "2"
+tempfile = "3"
+uuid = { version = "1", features = ["serde", "v4"] }
+walkdir = "2"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+# Image decoding and resizing is disproportionately slow at opt-level 0. Keep
+# the rest of the application easy and quick to debug, but compile the
+# thumbnail hot path with optimizations for `tauri dev` as well.
+[profile.dev.package.image]
+opt-level = 3
+
+[profile.dev.package.jpeg-decoder]
+opt-level = 3
+
+[profile.dev.package.rawler]
+opt-level = 3
+
+[profile.dev.package.zune-jpeg]
+opt-level = 3
+
+[profile.dev.package.importer-thumbnails]
+opt-level = 3

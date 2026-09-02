@@ -1,0 +1,14 @@
+services:
+  ci:
+    build:
+      context: .
+      dockerfile: Dockerfile.ci
+    volumes:
+      - cargo-registry:/root/.cargo/registry
+      - cargo-git:/root/.cargo/git
+      - target:/workspace/target
+
+volumes:
+  cargo-registry:
+  cargo-git:
+  target:

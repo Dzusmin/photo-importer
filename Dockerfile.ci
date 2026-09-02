@@ -1,0 +1,28 @@
+FROM node:24-bookworm
+
+ARG RUST_VERSION=1.98.0
+
+RUN apt-get update \
+    && DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends \
+        build-essential \
+        curl \
+        file \
+        libayatana-appindicator3-dev \
+        librsvg2-dev \
+        libssl-dev \
+        libwebkit2gtk-4.1-dev \
+        libxdo-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+    | sh -s -- -y --profile minimal --default-toolchain "${RUST_VERSION}"
+
+ENV PATH="/root/.cargo/bin:${PATH}"
+WORKDIR /workspace
+
+COPY package.json package-lock.json ./
+RUN npm ci
+
+COPY . .
+
+CMD ["sh", "-lc", "npm run check && cargo fmt --all --check && cargo clippy --workspace --all-targets -- -D warnings && cargo test --workspace"]

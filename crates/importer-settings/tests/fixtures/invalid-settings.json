@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "portable": {
+    "import": {
+      "defaultOperation": "copy",
+      "knownSourceBehavior": "ask",
+      "eventGapMinutes": 0
+    },
+    "naming": {
+      "folderTemplate": "{year}/{date}-{event_name}",
+      "collisionPolicy": "ask"
+    },
+    "cameraProfiles": []
+  },
+  "local": {
+    "libraryPath": null,
+    "startAtLogin": false,
+    "minimizeToTray": true,
+    "sourceBindings": []
+  }
+}

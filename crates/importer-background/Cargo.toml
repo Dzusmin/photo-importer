@@ -1,0 +1,15 @@
+[package]
+name = "importer-background"
+version = "0.1.0"
+description = "Pure state machine for background source monitoring"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+importer-domain = { path = "../importer-domain" }
+importer-media = { path = "../importer-media" }
+serde.workspace = true
+uuid.workspace = true
+
+[lints]
+workspace = true

@@ -1,0 +1,18 @@
+[package]
+name = "importer-plan"
+version = "0.1.0"
+edition.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+chrono.workspace = true
+importer-domain = { path = "../importer-domain" }
+importer-media = { path = "../importer-media" }
+serde.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true
