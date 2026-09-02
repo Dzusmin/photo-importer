@@ -127,6 +127,106 @@ button:focus-visible {
   background: #19251e;
 }
 
+.import-journey {
+  margin-bottom: 20px;
+  border: 1px solid #2b3b31;
+  border-radius: 16px;
+  padding: 16px 18px;
+  background: rgba(17, 25, 20, 0.91);
+}
+
+.import-journey ol {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.import-journey__step {
+  position: relative;
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 10px;
+  color: #657168;
+}
+
+.import-journey__step:not(:last-child)::after {
+  position: absolute;
+  z-index: 0;
+  top: 17px;
+  right: 12px;
+  left: 48px;
+  height: 1px;
+  background: #35443a;
+  content: "";
+}
+
+.import-journey__marker {
+  position: relative;
+  z-index: 1;
+  display: grid;
+  width: 34px;
+  height: 34px;
+  flex: none;
+  place-items: center;
+  border: 1px solid #3b4a40;
+  border-radius: 50%;
+  background: #111914;
+  font-size: 0.78rem;
+  font-weight: 800;
+}
+
+.import-journey__step > span:last-child {
+  position: relative;
+  z-index: 1;
+  min-width: 0;
+  padding-right: 10px;
+  background: #111914;
+}
+
+.import-journey__step strong,
+.import-journey__step small {
+  display: block;
+}
+
+.import-journey__step strong {
+  overflow: hidden;
+  font-size: 0.82rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.import-journey__step small {
+  margin-top: 2px;
+  font-size: 0.64rem;
+}
+
+.import-journey__step--completed {
+  color: #8fd8a4;
+}
+
+.import-journey__step--completed .import-journey__marker {
+  border-color: rgba(117, 219, 149, 0.45);
+  background: rgba(117, 219, 149, 0.1);
+}
+
+.import-journey__step--current {
+  color: #f4f7f4;
+}
+
+.import-journey__step--current .import-journey__marker {
+  border-color: #8fe2a8;
+  color: #0b1a10;
+  background: #8fe2a8;
+  box-shadow: 0 0 0 5px rgba(143, 226, 168, 0.09);
+}
+
+.import-journey__step--current small {
+  color: #8fe2a8;
+}
+
 .brand-mark {
   display: grid;
   width: 50px;
@@ -614,6 +714,36 @@ h3 {
   margin-top: 20px;
 }
 
+.review-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+  padding: 20px 22px;
+  border-bottom: 1px solid #34483b;
+  background: linear-gradient(100deg, rgba(117, 219, 149, 0.1), transparent);
+}
+
+.review-heading h3,
+.review-heading p {
+  margin-bottom: 0;
+}
+
+.review-heading p {
+  margin-top: 5px;
+  color: #9aa69e;
+  font-size: 0.8rem;
+}
+
+.review-heading > strong {
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #9ce9b3;
+  background: rgba(117, 219, 149, 0.09);
+  font-size: 0.7rem;
+  white-space: nowrap;
+}
+
 .source-list {
   display: flex;
   flex-direction: column;
@@ -1094,9 +1224,37 @@ h3 {
   background: #101813;
 }
 
+.plan-preview__heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 16px 15px;
+}
+
+.plan-preview__heading h3 {
+  margin: 3px 0 0;
+}
+
+.plan-readiness {
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #9ce9b3;
+  background: rgba(117, 219, 149, 0.1);
+  font-size: 0.7rem;
+  font-weight: 750;
+  white-space: nowrap;
+}
+
+.plan-readiness--requiresDecision,
+.plan-readiness--empty {
+  color: #e3bd75;
+  background: rgba(220, 168, 71, 0.1);
+}
+
 .plan-summary {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 1px;
   background: #26362c;
 }
@@ -1142,6 +1300,19 @@ h3 {
   color: #e3bd75;
   background: rgba(220, 168, 71, 0.07);
   font-size: 0.75rem;
+}
+
+.plan-attention {
+  border-top: 1px solid rgba(220, 168, 71, 0.25);
+  padding: 13px 15px;
+  color: #e3bd75;
+  background: rgba(220, 168, 71, 0.07);
+  font-size: 0.75rem;
+}
+
+.plan-attention p {
+  margin: 7px 0 0;
+  overflow-wrap: anywhere;
 }
 
 .plan-conflicts p {
@@ -1212,9 +1383,35 @@ h3 {
 
 .plan-start {
   display: flex;
+  align-items: center;
   justify-content: flex-end;
+  gap: 18px;
   border-top: 1px solid #26362c;
   padding: 14px 15px;
+}
+
+.risk-confirmation {
+  display: flex;
+  max-width: 560px;
+  align-items: flex-start;
+  gap: 9px;
+  margin-right: auto;
+  color: #d8c49e;
+  font-size: 0.75rem;
+  line-height: 1.4;
+}
+
+.risk-confirmation input {
+  width: 17px;
+  height: 17px;
+  flex: none;
+  margin-top: 0;
+  accent-color: #8fe2a8;
+}
+
+button.primary-action {
+  min-width: 172px;
+  box-shadow: 0 8px 28px rgba(117, 219, 149, 0.15);
 }
 
 .import-progress-panel {
@@ -1561,9 +1758,186 @@ input[readonly] {
 }
 
 .backup-targets,
-.backup-planner {
+.backup-planner,
+.backup-overview {
   padding: 26px 38px;
   border-bottom: 1px solid #26362c;
+}
+
+.backup-overview {
+  overflow: hidden;
+}
+
+.backup-overview > .backup-section-heading {
+  padding: 20px;
+  border-bottom: 1px solid #2b3b31;
+}
+
+.backup-orphan-warning {
+  padding: 14px 20px;
+  color: #f0c77c;
+  background: rgba(220, 168, 71, 0.1);
+  font-size: 0.8rem;
+}
+
+.backup-status-filters {
+  display: flex;
+  overflow-x: auto;
+  gap: 8px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #2b3b31;
+}
+
+.backup-status-filters button {
+  flex: none;
+  border: 1px solid #35483b;
+  border-radius: 999px;
+  padding: 7px 10px;
+  color: #aab6ad;
+  background: transparent;
+  font-size: 0.72rem;
+}
+
+.backup-status-filters button.active {
+  border-color: #75db95;
+  color: #102017;
+  background: #75db95;
+}
+
+.backup-status-filters strong {
+  margin-left: 5px;
+}
+
+.backup-file-list {
+  max-height: 480px;
+  overflow-y: auto;
+}
+
+.backup-file {
+  border-bottom: 1px solid #26362c;
+}
+
+.backup-file summary {
+  display: grid;
+  grid-template-columns: 150px minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 12px 20px;
+  cursor: pointer;
+  list-style-position: inside;
+}
+
+.backup-file summary code,
+.backup-history code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.backup-file summary small {
+  color: #7f8c83;
+  font-size: 0.7rem;
+}
+
+.backup-status,
+.backup-run {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 4px 8px;
+  color: #aeb9b1;
+  background: rgba(147, 160, 151, 0.12);
+  font-size: 0.66rem;
+  font-weight: 750;
+}
+
+.backup-status--current,
+.backup-run--succeeded {
+  color: #91e2aa;
+  background: rgba(117, 219, 149, 0.12);
+}
+
+.backup-status--new,
+.backup-status--changed {
+  color: #90c7f2;
+  background: rgba(90, 164, 220, 0.12);
+}
+
+.backup-status--corrupt,
+.backup-status--missingInBackup,
+.backup-run--failed {
+  color: #ff9e98;
+  background: rgba(226, 87, 78, 0.13);
+}
+
+.backup-status--deletedFromLibrary,
+.backup-run--cancelled {
+  color: #e8bf75;
+  background: rgba(220, 168, 71, 0.13);
+}
+
+.backup-file__details {
+  padding: 2px 20px 16px 182px;
+  color: #9ba79e;
+  font-size: 0.75rem;
+}
+
+.backup-file__details p {
+  margin: 5px 0;
+}
+
+.backup-file__details ul {
+  margin: 8px 0 0;
+  padding-left: 18px;
+}
+
+.backup-file__details li {
+  margin-top: 6px;
+}
+
+.backup-history {
+  padding: 15px 20px 18px;
+  background: #101813;
+}
+
+.backup-history > summary {
+  cursor: pointer;
+  font-weight: 750;
+}
+
+.backup-history > summary strong {
+  margin-left: 6px;
+  color: #75db95;
+}
+
+.backup-history ol {
+  margin: 14px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.backup-history li {
+  display: grid;
+  grid-template-columns: 90px minmax(180px, 1fr) auto;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-top: 1px solid #26362c;
+}
+
+.backup-history li div {
+  display: grid;
+  min-width: 0;
+  gap: 3px;
+}
+
+.backup-history li small {
+  color: #7f8c83;
+  text-align: right;
+}
+
+.backup-run__error {
+  color: #ff9e98;
+  font-size: 0.7rem;
 }
 
 .backup-section-heading,
@@ -1877,6 +2251,19 @@ input[readonly] {
 }
 
 @media (max-width: 760px) {
+  .backup-file summary,
+  .backup-history li {
+    grid-template-columns: 1fr;
+  }
+
+  .backup-file__details {
+    padding-left: 20px;
+  }
+
+  .backup-history li small {
+    text-align: left;
+  }
+
   .app-shell {
     padding: 20px;
   }
@@ -2016,9 +2403,22 @@ input[readonly] {
 
   .scan-tools,
   .time-correction,
-  .import-planner__heading {
+  .import-planner__heading,
+  .review-heading,
+  .plan-preview__heading,
+  .plan-start {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .review-heading > strong,
+  .plan-readiness {
+    align-self: flex-start;
+    white-space: normal;
+  }
+
+  .risk-confirmation {
+    margin-right: 0;
   }
 
   .result-filter {
@@ -2196,6 +2596,26 @@ input[readonly] {
   .backup-plan-actions {
     align-items: stretch;
     flex-direction: column;
+  }
+}
+
+@media (max-width: 560px) {
+  .import-journey ol {
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .import-journey__step:not(:last-child)::after {
+    top: 35px;
+    right: auto;
+    bottom: -13px;
+    left: 16px;
+    width: 1px;
+    height: auto;
+  }
+
+  .import-journey__step > span:last-child {
+    padding-right: 0;
   }
 }
 

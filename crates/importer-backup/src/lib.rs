@@ -4,6 +4,7 @@
 //! state and older versions live below the hidden-by-convention
 //! `Photo Backup/.photo-importer` directory.
 
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, BufReader, BufWriter, Read, Write};
 use std::path::{Component, Path, PathBuf};
@@ -82,6 +83,78 @@ pub struct BackupReport {
     pub unchanged_file_count: usize,
     pub versioned_file_count: usize,
     pub copied_bytes: u64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupRunOutcome {
+    Running,
+    Succeeded,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupRun {
+    pub id: Uuid,
+    pub target_id: Uuid,
+    pub source_root: PathBuf,
+    pub started_at_unix_ms: u64,
+    pub finished_at_unix_ms: Option<u64>,
+    pub outcome: BackupRunOutcome,
+    pub copied_file_count: usize,
+    pub unchanged_file_count: usize,
+    pub versioned_file_count: usize,
+    pub copied_bytes: u64,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum BackupFileStatus {
+    Current,
+    New,
+    Changed,
+    Corrupt,
+    MissingInBackup,
+    DeletedFromLibrary,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupFileVersion {
+    pub id: i64,
+    pub relative_path: PathBuf,
+    pub content_sha256: String,
+    pub version_path: PathBuf,
+    pub archived_at_unix_ms: u64,
+}
+
+/// Read-only inventory used by the UI today and by a future explicit restore flow.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupFileState {
+    pub relative_path: PathBuf,
+    pub status: BackupFileStatus,
+    pub size_bytes: u64,
+    pub source_sha256: Option<String>,
+    pub backup_sha256: Option<String>,
+    pub expected_sha256: Option<String>,
+    pub backed_up_at_unix_ms: Option<u64>,
+    pub orphaned: bool,
+    pub versions: Vec<BackupFileVersion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupSnapshot {
+    pub target_id: Uuid,
+    pub source_root: PathBuf,
+    pub backup_directory: PathBuf,
+    pub scanned_at_unix_ms: u64,
+    pub last_successful_run: Option<BackupRun>,
+    pub files: Vec<BackupFileState>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -352,6 +425,11 @@ impl BackupEngine {
     }
 
     #[must_use]
+    pub fn backup_root(&self) -> PathBuf {
+        self.backup_root.clone()
+    }
+
+    #[must_use]
     pub fn technical_root(&self) -> PathBuf {
         self.backup_root.join(TECHNICAL_DIRECTORY)
     }
@@ -476,6 +554,47 @@ impl BackupEngine {
         if plan.target_id != self.target.id {
             return Err(BackupError::WrongPlanTarget);
         }
+        let run_id = Uuid::new_v4();
+        let started_at = now_ms();
+        let connection = Connection::open(manifest_path(&self.target_root))?;
+        connection.execute(
+            "INSERT INTO backup_runs
+                (id, target_id, source_root, started_at_unix_ms, outcome)
+             VALUES (?1, ?2, ?3, ?4, 'running')",
+            params![
+                run_id.to_string(),
+                self.target.id.to_string(),
+                path_text(&plan.source_root),
+                to_i64(started_at)?,
+            ],
+        )?;
+        drop(connection);
+
+        let result = self.execute_with_progress_inner(
+            plan,
+            &mut on_progress,
+            &mut wait_between_files,
+            &mut is_cancelled,
+        );
+        let (outcome, report, error) = match &result {
+            Ok(report) => (BackupRunOutcome::Succeeded, Some(report), None),
+            Err(BackupError::Cancelled) => (BackupRunOutcome::Cancelled, None, None),
+            Err(error) => (BackupRunOutcome::Failed, None, Some(error.to_string())),
+        };
+        self.finish_run(run_id, outcome, report, error.as_deref())?;
+        result
+    }
+
+    fn execute_with_progress_inner(
+        &self,
+        plan: &BackupPlan,
+        on_progress: &mut impl FnMut(BackupProgress),
+        wait_between_files: &mut impl FnMut() -> bool,
+        is_cancelled: &mut impl FnMut() -> bool,
+    ) -> Result<BackupReport, BackupError> {
+        if plan.target_id != self.target.id {
+            return Err(BackupError::WrongPlanTarget);
+        }
         let mut report = BackupReport {
             copied_file_count: 0,
             unchanged_file_count: plan.unchanged_file_count,
@@ -490,7 +609,7 @@ impl BackupEngine {
                 return Err(BackupError::Cancelled);
             }
             validate_relative(&operation.relative_path)?;
-            if hash_file_with_cancel(&operation.source_path, &mut is_cancelled)?
+            if hash_file_with_cancel(&operation.source_path, &mut *is_cancelled)?
                 != operation.source_sha256
                 || fs::metadata(&operation.source_path)
                     .map_err(|source| io_error(&operation.source_path, source))?
@@ -529,7 +648,7 @@ impl BackupEngine {
                         current_path: Some(operation.relative_path.clone()),
                     });
                 },
-                &mut is_cancelled,
+                &mut *is_cancelled,
             ) {
                 let _ = fs::remove_file(&temporary);
                 return Err(error);
@@ -546,7 +665,7 @@ impl BackupEngine {
                         current_path: Some(operation.relative_path.clone()),
                     });
                 },
-                &mut is_cancelled,
+                &mut *is_cancelled,
             );
             let verified = match verified {
                 Ok(hash) => hash,
@@ -645,6 +764,175 @@ impl BackupEngine {
         Ok(report)
     }
 
+    pub fn history(&self) -> Result<Vec<BackupRun>, BackupError> {
+        let connection = Connection::open(manifest_path(&self.target_root))?;
+        let mut statement = connection.prepare(
+            "SELECT id, target_id, source_root, started_at_unix_ms,
+                    finished_at_unix_ms, outcome, copied_file_count,
+                    unchanged_file_count, versioned_file_count, copied_bytes, error
+             FROM backup_runs ORDER BY started_at_unix_ms DESC, id DESC",
+        )?;
+        let rows = statement.query_map([], backup_run_from_row)?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    pub fn inspect(&self, source_root: impl Into<PathBuf>) -> Result<BackupSnapshot, BackupError> {
+        let source_root = source_root.into();
+        if !source_root.is_dir() {
+            return Err(BackupError::InvalidSourceRoot(source_root));
+        }
+        reject_overlapping_roots(&source_root, &self.target_root)?;
+        let connection = Connection::open(manifest_path(&self.target_root))?;
+        let mut source_files = BTreeMap::new();
+        for entry in WalkDir::new(&source_root).follow_links(false) {
+            let entry = entry?;
+            if entry.file_type().is_file() {
+                let relative = entry
+                    .path()
+                    .strip_prefix(&source_root)
+                    .map_err(|_| BackupError::UnsafeRelativePath(entry.path().to_path_buf()))?
+                    .to_path_buf();
+                validate_relative(&relative)?;
+                source_files.insert(
+                    relative,
+                    (entry.metadata()?.len(), entry.path().to_path_buf()),
+                );
+            }
+        }
+        let mut records = BTreeMap::new();
+        {
+            let mut statement = connection.prepare(
+                "SELECT relative_path, content_sha256, size_bytes, backed_up_at_unix_ms
+                 FROM current_files",
+            )?;
+            let rows = statement.query_map([], |row| {
+                let size: i64 = row.get(2)?;
+                let backed_up: i64 = row.get(3)?;
+                Ok((
+                    PathBuf::from(row.get::<_, String>(0)?),
+                    (
+                        row.get::<_, String>(1)?,
+                        u64::try_from(size).unwrap_or_default(),
+                        u64::try_from(backed_up).unwrap_or_default(),
+                    ),
+                ))
+            })?;
+            for row in rows {
+                let (path, record) = row?;
+                records.insert(path, record);
+            }
+        }
+        let paths: BTreeSet<_> = source_files.keys().chain(records.keys()).cloned().collect();
+        let mut files = Vec::with_capacity(paths.len());
+        for relative_path in paths {
+            let source = source_files.get(&relative_path);
+            let record = records.get(&relative_path);
+            let source_sha256 = source.map(|(_, path)| hash_file(path)).transpose()?;
+            let destination = self.photos_root().join(&relative_path);
+            let backup_sha256 = destination
+                .is_file()
+                .then(|| hash_file(&destination))
+                .transpose()?;
+            let expected_sha256 = record.map(|record| record.0.clone());
+            let status = match (source, record, backup_sha256.as_deref()) {
+                (None, Some(_), Some(_)) => BackupFileStatus::DeletedFromLibrary,
+                (None, Some(_), None) => BackupFileStatus::MissingInBackup,
+                (Some(_), None, _) => BackupFileStatus::New,
+                (Some(_), Some(_), None) => BackupFileStatus::MissingInBackup,
+                (Some(_), Some((expected, _, _)), Some(actual)) if expected != actual => {
+                    BackupFileStatus::Corrupt
+                }
+                (Some(_), Some((expected, _, _)), Some(_))
+                    if source_sha256.as_deref() != Some(expected) =>
+                {
+                    BackupFileStatus::Changed
+                }
+                _ => BackupFileStatus::Current,
+            };
+            let versions = self.versions_for(&connection, &relative_path)?;
+            files.push(BackupFileState {
+                relative_path,
+                status,
+                size_bytes: source.map_or_else(|| record.map_or(0, |r| r.1), |s| s.0),
+                source_sha256,
+                backup_sha256,
+                expected_sha256,
+                backed_up_at_unix_ms: record.map(|record| record.2),
+                orphaned: status == BackupFileStatus::DeletedFromLibrary,
+                versions,
+            });
+        }
+        let last_successful_run = self
+            .history()?
+            .into_iter()
+            .find(|run| run.outcome == BackupRunOutcome::Succeeded);
+        Ok(BackupSnapshot {
+            target_id: self.target.id,
+            source_root,
+            backup_directory: self.backup_root.clone(),
+            scanned_at_unix_ms: now_ms(),
+            last_successful_run,
+            files,
+        })
+    }
+
+    fn versions_for(
+        &self,
+        connection: &Connection,
+        relative_path: &Path,
+    ) -> Result<Vec<BackupFileVersion>, BackupError> {
+        let mut statement = connection.prepare(
+            "SELECT id, relative_path, content_sha256, version_path, archived_at_unix_ms
+             FROM file_versions WHERE relative_path = ?1 ORDER BY archived_at_unix_ms DESC, id DESC",
+        )?;
+        let rows = statement.query_map([path_text(relative_path)], |row| {
+            let archived: i64 = row.get(4)?;
+            Ok(BackupFileVersion {
+                id: row.get(0)?,
+                relative_path: PathBuf::from(row.get::<_, String>(1)?),
+                content_sha256: row.get(2)?,
+                version_path: self
+                    .backup_root
+                    .join(PathBuf::from(row.get::<_, String>(3)?)),
+                archived_at_unix_ms: u64::try_from(archived).unwrap_or_default(),
+            })
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+    }
+
+    fn finish_run(
+        &self,
+        id: Uuid,
+        outcome: BackupRunOutcome,
+        report: Option<&BackupReport>,
+        error: Option<&str>,
+    ) -> Result<(), BackupError> {
+        let outcome = match outcome {
+            BackupRunOutcome::Running => "running",
+            BackupRunOutcome::Succeeded => "succeeded",
+            BackupRunOutcome::Failed => "failed",
+            BackupRunOutcome::Cancelled => "cancelled",
+        };
+        let connection = Connection::open(manifest_path(&self.target_root))?;
+        connection.execute(
+            "UPDATE backup_runs SET finished_at_unix_ms = ?2, outcome = ?3,
+                    copied_file_count = ?4, unchanged_file_count = ?5,
+                    versioned_file_count = ?6, copied_bytes = ?7, error = ?8
+             WHERE id = ?1",
+            params![
+                id.to_string(),
+                to_i64(now_ms())?,
+                outcome,
+                i64::try_from(report.map_or(0, |r| r.copied_file_count)).unwrap_or(i64::MAX),
+                i64::try_from(report.map_or(0, |r| r.unchanged_file_count)).unwrap_or(i64::MAX),
+                i64::try_from(report.map_or(0, |r| r.versioned_file_count)).unwrap_or(i64::MAX),
+                to_i64(report.map_or(0, |r| r.copied_bytes))?,
+                error
+            ],
+        )?;
+        Ok(())
+    }
+
     fn version_path(&self, relative_path: &Path, hash: &str) -> PathBuf {
         let parent = relative_path.parent().unwrap_or_else(|| Path::new(""));
         let name = relative_path
@@ -679,9 +967,52 @@ fn initialize_manifest(path: &Path) -> Result<(), BackupError> {
             content_sha256 TEXT NOT NULL CHECK(length(content_sha256) = 64),
             version_path TEXT NOT NULL UNIQUE,
             archived_at_unix_ms INTEGER NOT NULL
+         );
+         CREATE TABLE IF NOT EXISTS backup_runs (
+            id TEXT PRIMARY KEY NOT NULL,
+            target_id TEXT NOT NULL,
+            source_root TEXT NOT NULL,
+            started_at_unix_ms INTEGER NOT NULL,
+            finished_at_unix_ms INTEGER,
+            outcome TEXT NOT NULL CHECK(outcome IN ('running', 'succeeded', 'failed', 'cancelled')),
+            copied_file_count INTEGER NOT NULL DEFAULT 0,
+            unchanged_file_count INTEGER NOT NULL DEFAULT 0,
+            versioned_file_count INTEGER NOT NULL DEFAULT 0,
+            copied_bytes INTEGER NOT NULL DEFAULT 0,
+            error TEXT
          );",
     )?;
     Ok(())
+}
+
+fn backup_run_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<BackupRun> {
+    let id: String = row.get(0)?;
+    let target_id: String = row.get(1)?;
+    let started: i64 = row.get(3)?;
+    let finished: Option<i64> = row.get(4)?;
+    let outcome: String = row.get(5)?;
+    Ok(BackupRun {
+        id: Uuid::parse_str(&id).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        target_id: Uuid::parse_str(&target_id).map_err(|e| {
+            rusqlite::Error::FromSqlConversionFailure(1, rusqlite::types::Type::Text, Box::new(e))
+        })?,
+        source_root: PathBuf::from(row.get::<_, String>(2)?),
+        started_at_unix_ms: u64::try_from(started).unwrap_or_default(),
+        finished_at_unix_ms: finished.and_then(|value| u64::try_from(value).ok()),
+        outcome: match outcome.as_str() {
+            "succeeded" => BackupRunOutcome::Succeeded,
+            "failed" => BackupRunOutcome::Failed,
+            "cancelled" => BackupRunOutcome::Cancelled,
+            _ => BackupRunOutcome::Running,
+        },
+        copied_file_count: usize::try_from(row.get::<_, i64>(6)?).unwrap_or_default(),
+        unchanged_file_count: usize::try_from(row.get::<_, i64>(7)?).unwrap_or_default(),
+        versioned_file_count: usize::try_from(row.get::<_, i64>(8)?).unwrap_or_default(),
+        copied_bytes: u64::try_from(row.get::<_, i64>(9)?).unwrap_or_default(),
+        error: row.get(10)?,
+    })
 }
 
 fn current_record(

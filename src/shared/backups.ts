@@ -63,6 +63,59 @@ export interface BackupJob {
   report: BackupReport | null;
 }
 
+export type BackupRunOutcome = "running" | "succeeded" | "failed" | "cancelled";
+
+export interface BackupRun {
+  id: string;
+  targetId: string;
+  sourceRoot: string;
+  startedAtUnixMs: number;
+  finishedAtUnixMs: number | null;
+  outcome: BackupRunOutcome;
+  copiedFileCount: number;
+  unchangedFileCount: number;
+  versionedFileCount: number;
+  copiedBytes: number;
+  error: string | null;
+}
+
+export type BackupFileStatus =
+  | "current"
+  | "new"
+  | "changed"
+  | "corrupt"
+  | "missingInBackup"
+  | "deletedFromLibrary";
+
+export interface BackupFileVersion {
+  id: number;
+  relativePath: string;
+  contentSha256: string;
+  versionPath: string;
+  archivedAtUnixMs: number;
+}
+
+export interface BackupFileState {
+  relativePath: string;
+  status: BackupFileStatus;
+  sizeBytes: number;
+  sourceSha256: string | null;
+  backupSha256: string | null;
+  expectedSha256: string | null;
+  backedUpAtUnixMs: number | null;
+  orphaned: boolean;
+  versions: BackupFileVersion[];
+}
+
+export interface BackupSnapshot {
+  targetId: string;
+  sourceRoot: string;
+  backupDirectory: string;
+  scannedAtUnixMs: number;
+  lastSuccessfulRun: BackupRun | null;
+  files: BackupFileState[];
+}
+
 export function registerBackupTarget(
   path: string,
   label: string,
@@ -126,6 +179,32 @@ export function cancelBackupJob(jobId: string): Promise<BackupJob> {
   return invoke<BackupJob>("cancel_backup_job", { jobId });
 }
 
+export function inspectBackup(
+  targetId: string,
+  targetPath: string,
+  sourcePath: string,
+): Promise<BackupSnapshot> {
+  return invoke<BackupSnapshot>("inspect_backup", {
+    targetId,
+    targetPath,
+    sourcePath,
+  });
+}
+
+export function listBackupHistory(
+  targetId: string,
+  targetPath: string,
+): Promise<BackupRun[]> {
+  return invoke<BackupRun[]>("list_backup_history", { targetId, targetPath });
+}
+
+export function openBackupDirectory(
+  targetId: string,
+  targetPath: string,
+): Promise<void> {
+  return invoke<void>("open_backup_directory", { targetId, targetPath });
+}
+
 export function normalizeBackupError(error: unknown): BackupCommandError {
   if (typeof error === "object" && error !== null) {
     const candidate = error as Partial<BackupCommandError>;
@@ -162,4 +241,5 @@ const friendlyBackupMessages: Record<string, string> = {
     "Skopiowany plik nie przeszedł weryfikacji. Oryginalny plik pozostał bez zmian.",
   backupIoFailed:
     "Nie udało się odczytać lub zapisać pliku. Sprawdź, czy dysk jest podłączony i ma wolne miejsce.",
+  openBackupDirectoryFailed: "Nie udało się otworzyć katalogu kopii.",
 };

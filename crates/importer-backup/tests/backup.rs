@@ -2,8 +2,8 @@ use std::cell::{Cell, RefCell};
 use std::fs;
 
 use importer_backup::{
-    BACKUP_DIRECTORY, BackupError, BackupOperationKind, BackupPhase, PHOTOS_DIRECTORY,
-    TECHNICAL_DIRECTORY, TargetRegistry,
+    BACKUP_DIRECTORY, BackupError, BackupFileStatus, BackupOperationKind, BackupPhase,
+    BackupRunOutcome, PHOTOS_DIRECTORY, TECHNICAL_DIRECTORY, TargetRegistry,
 };
 
 fn setup() -> (
@@ -216,9 +216,40 @@ fn cancellation_keeps_completed_files_and_removes_partial_files() {
     );
     assert!(!engine.photos_root().join("b.jpg").exists());
     assert_eq!(fs::read_dir(staging).unwrap().count(), 0);
+    assert_eq!(
+        engine.history().unwrap()[0].outcome,
+        BackupRunOutcome::Cancelled
+    );
     let resumed = engine.plan(&source).unwrap();
     assert_eq!(resumed.unchanged_file_count, 1);
     assert_eq!(resumed.operations.len(), 1);
+}
+
+#[test]
+fn records_a_failed_run_with_its_error() {
+    let (directory, registry, target) = setup();
+    let source = directory.path().join("library");
+    fs::create_dir(&source).unwrap();
+    fs::write(source.join("photo.jpg"), b"planned").unwrap();
+    let engine = registry
+        .connect(target.id, directory.path().join("disk"))
+        .unwrap();
+    let plan = engine.plan(&source).unwrap();
+    fs::write(source.join("photo.jpg"), b"changed after planning").unwrap();
+
+    assert!(matches!(
+        engine.execute(&plan),
+        Err(BackupError::SourceChanged(_))
+    ));
+    let history = engine.history().unwrap();
+    assert_eq!(history[0].outcome, BackupRunOutcome::Failed);
+    assert!(history[0].finished_at_unix_ms.is_some());
+    assert!(
+        history[0]
+            .error
+            .as_deref()
+            .is_some_and(|error| error.contains("source changed"))
+    );
 }
 
 #[test]
@@ -251,5 +282,71 @@ fn cancellation_inside_a_large_copy_cleans_the_temporary_file() {
             .unwrap()
             .count(),
         0
+    );
+}
+
+#[test]
+fn persists_run_history_and_reports_every_library_backup_state_without_deleting_orphans() {
+    let (directory, registry, target) = setup();
+    let source = directory.path().join("library");
+    fs::create_dir(&source).unwrap();
+    for name in [
+        "current.jpg",
+        "changed.jpg",
+        "corrupt.jpg",
+        "missing.jpg",
+        "deleted.jpg",
+        "versioned.jpg",
+    ] {
+        fs::write(source.join(name), format!("original-{name}")).unwrap();
+    }
+    let engine = registry
+        .connect(target.id, directory.path().join("disk"))
+        .unwrap();
+    engine.execute(&engine.plan(&source).unwrap()).unwrap();
+
+    fs::write(source.join("versioned.jpg"), b"new-version").unwrap();
+    engine.execute(&engine.plan(&source).unwrap()).unwrap();
+    fs::write(source.join("changed.jpg"), b"changed-library-content").unwrap();
+    fs::write(source.join("new.jpg"), b"not-backed-up-yet").unwrap();
+    fs::write(engine.photos_root().join("corrupt.jpg"), b"tampered").unwrap();
+    fs::remove_file(engine.photos_root().join("missing.jpg")).unwrap();
+    fs::remove_file(source.join("deleted.jpg")).unwrap();
+
+    let snapshot = engine.inspect(&source).unwrap();
+    let status = |name: &str| {
+        snapshot
+            .files
+            .iter()
+            .find(|file| file.relative_path == std::path::Path::new(name))
+            .unwrap()
+    };
+    assert_eq!(status("current.jpg").status, BackupFileStatus::Current);
+    assert_eq!(status("new.jpg").status, BackupFileStatus::New);
+    assert_eq!(status("changed.jpg").status, BackupFileStatus::Changed);
+    assert_eq!(status("corrupt.jpg").status, BackupFileStatus::Corrupt);
+    assert_eq!(
+        status("missing.jpg").status,
+        BackupFileStatus::MissingInBackup
+    );
+    assert_eq!(
+        status("deleted.jpg").status,
+        BackupFileStatus::DeletedFromLibrary
+    );
+    assert!(status("deleted.jpg").orphaned);
+    assert!(engine.photos_root().join("deleted.jpg").is_file());
+    assert_eq!(status("versioned.jpg").versions.len(), 1);
+    assert!(status("versioned.jpg").versions[0].version_path.is_file());
+
+    let history = engine.history().unwrap();
+    assert_eq!(history.len(), 2);
+    assert!(
+        history.iter().all(|run| {
+            run.target_id == target.id && run.outcome == BackupRunOutcome::Succeeded
+        })
+    );
+    assert_eq!(
+        snapshot.last_successful_run.as_ref().unwrap().id,
+        history[0].id
     );
 }

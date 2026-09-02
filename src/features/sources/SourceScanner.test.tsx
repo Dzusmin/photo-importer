@@ -209,6 +209,13 @@ describe("SourceScanner", () => {
     });
     const user = userEvent.setup();
     render(<SourceScanner />);
+    expect(
+      screen.getByRole("navigation", { name: "Etapy importu" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("Źródło").closest("li")).toHaveAttribute(
+      "aria-current",
+      "step",
+    );
     await user.click(await screen.findByRole("button", { name: "Skanuj" }));
     await emit(
       "scan-progress",
@@ -217,6 +224,12 @@ describe("SourceScanner", () => {
         phase: "completed",
         result: response,
       }),
+    );
+    await waitFor(() =>
+      expect(screen.getByText("Przegląd").closest("li")).toHaveAttribute(
+        "aria-current",
+        "step",
+      ),
     );
 
     const select = await screen.findByLabelText("Zaznacz do korekty czasu");
@@ -235,6 +248,17 @@ describe("SourceScanner", () => {
     );
 
     await user.click(screen.getByRole("button", { name: "Przygotuj plan" }));
+    await waitFor(() =>
+      expect(screen.getByText("Plan").closest("li")).toHaveAttribute(
+        "aria-current",
+        "step",
+      ),
+    );
+    expect(screen.getByText("Nowe pozycje")).toBeInTheDocument();
+    expect(screen.getByText("Pominięte pozycje")).toBeInTheDocument();
+    expect(screen.getByText("Konflikty")).toBeInTheDocument();
+    expect(screen.getByText("Kopiowanie")).toBeInTheDocument();
+    expect(screen.getByText(/Katalog docelowy/)).toBeInTheDocument();
     expect(await screen.findByText("event\\IMG.JPG")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
     await waitFor(() =>
@@ -243,6 +267,12 @@ describe("SourceScanner", () => {
       ).toBe(true),
     );
     await emit("import-progress", importSessionFixture({ status: "running" }));
+    await waitFor(() =>
+      expect(screen.getByText("Import").closest("li")).toHaveAttribute(
+        "aria-current",
+        "step",
+      ),
+    );
     await user.click(
       await screen.findByRole("button", { name: "Pauza po bieżącym zestawie" }),
     );
@@ -349,6 +379,16 @@ describe("SourceScanner", () => {
     );
     await user.click(
       await screen.findByRole("button", { name: "Przygotuj plan" }),
+    );
+    expect(
+      screen.getByText(
+        "Po weryfikacji całych zestawów pliki źródłowe zostaną usunięte.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("checkbox", {
+        name: /Rozumiem, że po weryfikacji pliki źródłowe zostaną usunięte/,
+      }),
     );
     await user.click(
       await screen.findByRole("button", { name: "Rozpocznij import" }),

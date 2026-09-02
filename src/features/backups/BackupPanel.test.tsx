@@ -2,7 +2,13 @@ import { mockIPC } from "@tauri-apps/api/mocks";
 import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { BackupJob, BackupPlan, BackupTarget } from "../../shared/backups";
+import type {
+  BackupJob,
+  BackupPlan,
+  BackupRun,
+  BackupSnapshot,
+  BackupTarget,
+} from "../../shared/backups";
 import type { SourceVolume } from "../../shared/sources";
 import { settingsResponseFixture } from "../../test/fixtures";
 import { BackupPanel } from "./BackupPanel";
@@ -114,6 +120,60 @@ function settings() {
   response.settings.local.libraryPath = "C:\\Library";
   return response;
 }
+
+const successfulRun: BackupRun = {
+  id: "run-1",
+  targetId: target.id,
+  sourceRoot: "C:\\Library",
+  startedAtUnixMs: 1_788_000_000_000,
+  finishedAtUnixMs: 1_788_000_060_000,
+  outcome: "succeeded",
+  copiedFileCount: 2,
+  unchangedFileCount: 4,
+  versionedFileCount: 1,
+  copiedBytes: 600,
+  error: null,
+};
+
+const snapshot: BackupSnapshot = {
+  targetId: target.id,
+  sourceRoot: "C:\\Library",
+  backupDirectory: "E:\\Photo Backup",
+  scannedAtUnixMs: 1_788_000_070_000,
+  lastSuccessfulRun: successfulRun,
+  files: [
+    {
+      relativePath: "current.jpg",
+      status: "current",
+      sizeBytes: 100,
+      sourceSha256: "a".repeat(64),
+      backupSha256: "a".repeat(64),
+      expectedSha256: "a".repeat(64),
+      backedUpAtUnixMs: successfulRun.finishedAtUnixMs,
+      orphaned: false,
+      versions: [],
+    },
+    {
+      relativePath: "old.jpg",
+      status: "deletedFromLibrary",
+      sizeBytes: 200,
+      sourceSha256: null,
+      backupSha256: "b".repeat(64),
+      expectedSha256: "b".repeat(64),
+      backedUpAtUnixMs: successfulRun.finishedAtUnixMs,
+      orphaned: true,
+      versions: [
+        {
+          id: 1,
+          relativePath: "old.jpg",
+          contentSha256: "c".repeat(64),
+          versionPath: "E:\\Photo Backup\\.photo-importer\\versions\\old.jpg",
+          archivedAtUnixMs: 1_787_000_000_000,
+        },
+      ],
+    },
+  ],
+};
 
 describe("BackupPanel", () => {
   beforeEach(() => {
@@ -274,5 +334,42 @@ describe("BackupPanel", () => {
     expect(
       screen.getByText(/Dysk backupu został odłączony/),
     ).toBeInTheDocument();
+  });
+
+  it("shows persistent history, file states, orphan warning and previous versions", async () => {
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "list_backup_targets") return [target];
+      if (command === "list_backup_jobs") return [];
+      if (command === "load_settings") return settings();
+      if (command === "list_media_sources") return [volume];
+      if (command === "recognize_backup_target") return target;
+      if (command === "inspect_backup") return snapshot;
+      if (command === "list_backup_history") return [successfulRun];
+      if (command === "open_backup_directory") return null;
+    });
+    const user = userEvent.setup();
+    render(<BackupPanel />);
+
+    expect(
+      await screen.findByText(/Ostatni udany backup:/),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent(
+      "Nadal pozostają w backupie",
+    );
+    expect(screen.getAllByText("Usunięty z biblioteki").length).toBeGreaterThan(
+      0,
+    );
+    await user.click(screen.getByText("old.jpg"));
+    expect(
+      await screen.findByText(/gotowe pod przyszłe przywracanie/),
+    ).toBeInTheDocument();
+    await user.click(screen.getByText("Historia uruchomień"));
+    expect(await screen.findByText("Udany")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Otwórz katalog kopii" }),
+    );
+    await waitFor(() => expect(calls).toContain("open_backup_directory"));
   });
 });

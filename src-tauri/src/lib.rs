@@ -16,9 +16,10 @@ use background::{
     ignore_source_until_disconnect, refresh_background_monitor, start_source_workflow,
 };
 use backups::{
-    BackupService, cancel_backup_job, get_backup_job, list_backup_jobs, list_backup_targets,
-    pause_backup_job, prepare_backup_plan, recognize_backup_target, register_backup_target,
-    remove_backup_target, resume_backup_job, start_backup_job,
+    BackupService, cancel_backup_job, get_backup_job, inspect_backup, list_backup_history,
+    list_backup_jobs, list_backup_targets, open_backup_directory, pause_backup_job,
+    prepare_backup_plan, recognize_backup_target, register_backup_target, remove_backup_target,
+    resume_backup_job, start_backup_job,
 };
 use imports::{
     ImportService, cancel_import_session, create_import_session, get_import_session,
@@ -147,6 +148,9 @@ pub fn run() {
             recognize_backup_target,
             remove_backup_target,
             prepare_backup_plan,
+            inspect_backup,
+            list_backup_history,
+            open_backup_directory,
             start_backup_job,
             get_backup_job,
             list_backup_jobs,

@@ -101,6 +101,8 @@ export function SourceScanner({
     () => sources.filter((source) => source.likelyCameraSource),
     [sources],
   );
+  const journeyStep = importSession ? 3 : importPlan ? 2 : scanResult ? 1 : 0;
+  const journeyFinished = importSession?.status === "completed";
 
   useEffect(() => {
     void loadSettings()
@@ -787,6 +789,7 @@ export function SourceScanner({
 
   return (
     <>
+      <ImportJourney currentStep={journeyStep} finished={journeyFinished} />
       <section className="source-hero">
         <div>
           <p className="section-label">ŹRÓDŁA MEDIÓW</p>
@@ -805,6 +808,7 @@ export function SourceScanner({
           </p>
           <button
             type="button"
+            className="secondary"
             onClick={() => void chooseDirectory()}
             disabled={
               scanningPath !== null ||
@@ -976,6 +980,9 @@ export function SourceScanner({
             importSession={importSession}
             importActionPending={importActionPending}
             onBeginImport={() => void beginImport()}
+            importOperation={
+              settings?.portable.import.defaultOperation ?? "copy"
+            }
             onControlImport={(action) => void controlImport(action)}
             onRetryRollback={() => void retryRollback()}
             cameraProfiles={settings?.portable.cameraProfiles ?? []}
@@ -991,6 +998,52 @@ export function SourceScanner({
         </>
       )}
     </>
+  );
+}
+
+function ImportJourney({
+  currentStep,
+  finished,
+}: {
+  currentStep: number;
+  finished: boolean;
+}) {
+  const steps = ["Źródło", "Przegląd", "Plan", "Import"];
+  return (
+    <nav className="import-journey" aria-label="Etapy importu">
+      <ol>
+        {steps.map((label, index) => {
+          const state =
+            index < currentStep || finished
+              ? "completed"
+              : index === currentStep
+                ? "current"
+                : "unavailable";
+          const stateLabel =
+            state === "completed"
+              ? "ukończony"
+              : state === "current"
+                ? "bieżący"
+                : "niedostępny";
+          return (
+            <li
+              className={`import-journey__step import-journey__step--${state}`}
+              key={label}
+              aria-current={state === "current" ? "step" : undefined}
+              aria-disabled={state === "unavailable" ? "true" : undefined}
+            >
+              <span className="import-journey__marker" aria-hidden="true">
+                {state === "completed" ? "✓" : index + 1}
+              </span>
+              <span>
+                <strong>{label}</strong>
+                <small>{stateLabel}</small>
+              </span>
+            </li>
+          );
+        })}
+      </ol>
+    </nav>
   );
 }
 
@@ -1108,6 +1161,7 @@ function ScanResults({
   importSession,
   importActionPending,
   onBeginImport,
+  importOperation,
   onControlImport,
   onRetryRollback,
   cameraProfiles,
@@ -1135,6 +1189,7 @@ function ScanResults({
   importSession: ImportSession | null;
   importActionPending: boolean;
   onBeginImport: () => void;
+  importOperation: AppSettings["portable"]["import"]["defaultOperation"];
   onControlImport: (action: "resume" | "pause" | "cancel") => void;
   onRetryRollback: () => void;
   cameraProfiles: AppSettings["portable"]["cameraProfiles"];
@@ -1191,6 +1246,14 @@ function ScanResults({
 
   return (
     <section className="scan-results">
+      <header className="review-heading">
+        <div>
+          <span className="section-label">NASTĘPNY KROK · PRZEGLĄD</span>
+          <h3>Przejrzyj wyniki skanu</h3>
+          <p>Sprawdź wydarzenia, popraw czas i zdecyduj, co uwzględnić.</p>
+        </div>
+        {!importPlan && <strong>Potem przygotujesz plan importu</strong>}
+      </header>
       <div className="scan-summary">
         <div>
           <span>Pozycje</span>
@@ -1260,6 +1323,7 @@ function ScanResults({
           </select>
           <button
             type="button"
+            className="secondary"
             onClick={onApplyCorrection}
             disabled={busy || selectedKeys.size === 0}
           >
@@ -1456,6 +1520,7 @@ function ScanResults({
           </div>
           <button
             type="button"
+            className={importPlan ? "secondary" : "primary-action"}
             onClick={onPrepareImportPlan}
             disabled={planning || busy}
           >
@@ -1471,6 +1536,16 @@ function ScanResults({
             plan={importPlan}
             onBeginImport={onBeginImport}
             actionPending={importActionPending}
+            operation={importOperation}
+            newItemCount={
+              result.importMatches.filter((match) => match.state === "new")
+                .length
+            }
+            skippedItemCount={
+              result.importMatches.filter((match) => match.state !== "new")
+                .length + excludedImportKeys.size
+            }
+            scanWarnings={result.scan.warnings}
             sessionActive={
               importSession !== null &&
               !["completed", "cancelled"].includes(importSession.status)
@@ -1761,12 +1836,22 @@ function ImportPlanPreview({
   onBeginImport,
   actionPending,
   sessionActive,
+  operation,
+  newItemCount,
+  skippedItemCount,
+  scanWarnings,
 }: {
   plan: ImportPlan;
   onBeginImport: () => void;
   actionPending: boolean;
   sessionActive: boolean;
+  operation: AppSettings["portable"]["import"]["defaultOperation"];
+  newItemCount: number;
+  skippedItemCount: number;
+  scanWarnings: SourceScanResponse["scan"]["warnings"];
 }) {
+  const [riskConfirmed, setRiskConfirmed] = useState(false);
+  const riskyOperation = operation === "moveAfterVerification";
   const cameraSections = new Map<
     string,
     Array<{
@@ -1791,37 +1876,66 @@ function ImportPlanPreview({
   }
   return (
     <div className="plan-preview">
+      <div className="plan-preview__heading">
+        <div>
+          <span className="section-label">PODSUMOWANIE PRZED IMPORTEM</span>
+          <h3>Sprawdź konsekwencje operacji</h3>
+        </div>
+        <span
+          className={`plan-readiness plan-readiness--${plan.status}`}
+          role="status"
+        >
+          {plan.status === "ready"
+            ? "Gotowy do zatwierdzenia"
+            : plan.status === "empty"
+              ? "Brak plików do importu"
+              : "Wymaga uwagi"}
+        </span>
+      </div>
       <div className="plan-summary">
         <div>
-          <span>Status</span>
-          <strong>
-            {plan.status === "ready"
-              ? "gotowy"
-              : plan.status === "empty"
-                ? "pusty"
-                : "wymaga decyzji"}
-          </strong>
+          <span>Nowe pozycje</span>
+          <strong>{newItemCount}</strong>
         </div>
         <div>
-          <span>Pozycje / pliki</span>
-          <strong>
-            {plan.itemCount} / {plan.fileCount}
-          </strong>
+          <span>Pominięte pozycje</span>
+          <strong>{skippedItemCount}</strong>
         </div>
         <div>
-          <span>Do skopiowania</span>
+          <span>Rozmiar danych</span>
           <strong>{formatBytes(plan.totalSizeBytes)}</strong>
         </div>
         <div>
-          <span>Pominięte</span>
-          <strong>
-            {plan.excludedItemCount} pozycji · {plan.excludedFileCount} plików
-          </strong>
+          <span>Konflikty</span>
+          <strong>{plan.conflicts.length}</strong>
+        </div>
+        <div>
+          <span>Operacja</span>
+          <strong>{riskyOperation ? "Przenoszenie" : "Kopiowanie"}</strong>
+        </div>
+        <div>
+          <span>Pliki do importu</span>
+          <strong>{plan.fileCount}</strong>
         </div>
       </div>
       <p className="plan-library">
-        Biblioteka: <code>{plan.libraryRoot}</code>
+        Katalog docelowy: <code>{plan.libraryRoot}</code>
       </p>
+      {(scanWarnings.length > 0 || riskyOperation) && (
+        <div className="plan-attention" role="alert">
+          <strong>Wymaga uwagi</strong>
+          {riskyOperation && (
+            <p>
+              Po weryfikacji całych zestawów pliki źródłowe zostaną usunięte.
+            </p>
+          )}
+          {scanWarnings.map((warning) => (
+            <p key={`${warning.path}-${warning.message}`}>
+              {warning.path}: {warning.message}
+            </p>
+          ))}
+        </div>
+      )}
       {plan.conflicts.length > 0 && (
         <div className="plan-conflicts" role="alert">
           <strong>{plan.conflicts.length} kolizji</strong>
@@ -1878,10 +1992,26 @@ function ImportPlanPreview({
         ))}
       </div>
       <div className="plan-start">
+        {riskyOperation && (
+          <label className="risk-confirmation">
+            <input
+              type="checkbox"
+              checked={riskConfirmed}
+              onChange={(event) => setRiskConfirmed(event.target.checked)}
+            />
+            Rozumiem, że po weryfikacji pliki źródłowe zostaną usunięte
+          </label>
+        )}
         <button
           type="button"
+          className="primary-action"
           onClick={onBeginImport}
-          disabled={plan.status !== "ready" || actionPending || sessionActive}
+          disabled={
+            plan.status !== "ready" ||
+            actionPending ||
+            sessionActive ||
+            (riskyOperation && !riskConfirmed)
+          }
         >
           {actionPending ? "Uruchamianie…" : "Rozpocznij import"}
         </button>

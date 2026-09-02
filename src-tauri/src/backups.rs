@@ -7,8 +7,8 @@ use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use importer_backup::{
-    BackupError, BackupPhase, BackupPlan, BackupProgress, BackupReport, BackupTarget,
-    TargetRegistry,
+    BackupError, BackupPhase, BackupPlan, BackupProgress, BackupReport, BackupRun, BackupSnapshot,
+    BackupTarget, TargetRegistry,
 };
 use importer_domain::AppSettings;
 use importer_media::{SourceDiscovery, SourceVolume, SystemSourceDiscovery};
@@ -32,6 +32,14 @@ struct InternalBackupJob {
     cancel: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
 }
+
+type StartedBackupJob = (
+    BackupJob,
+    importer_backup::BackupEngine,
+    Arc<AtomicBool>,
+    Arc<AtomicBool>,
+    bool,
+);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -157,6 +165,43 @@ impl BackupService {
             .map_err(BackupCommandError::from)
     }
 
+    fn inspect(
+        &self,
+        target_id: &str,
+        target_path: PathBuf,
+        source_path: PathBuf,
+    ) -> Result<BackupSnapshot, BackupCommandError> {
+        let target_id = parse_target_id(target_id)?;
+        self.registry
+            .connect(target_id, target_path)
+            .and_then(|engine| engine.inspect(source_path))
+            .map_err(BackupCommandError::from)
+    }
+
+    fn history(
+        &self,
+        target_id: &str,
+        target_path: PathBuf,
+    ) -> Result<Vec<BackupRun>, BackupCommandError> {
+        let target_id = parse_target_id(target_id)?;
+        self.registry
+            .connect(target_id, target_path)
+            .and_then(|engine| engine.history())
+            .map_err(BackupCommandError::from)
+    }
+
+    fn backup_directory(
+        &self,
+        target_id: &str,
+        target_path: PathBuf,
+    ) -> Result<PathBuf, BackupCommandError> {
+        let target_id = parse_target_id(target_id)?;
+        self.registry
+            .connect(target_id, target_path)
+            .map(|engine| engine.backup_root())
+            .map_err(BackupCommandError::from)
+    }
+
     fn update_job(&self, id: &str, update: impl FnOnce(&mut BackupJob)) -> Option<BackupJob> {
         let mut jobs = self.jobs.lock().ok()?;
         let job = &mut jobs.get_mut(id)?.public;
@@ -169,16 +214,7 @@ impl BackupService {
         &self,
         plan: &BackupPlan,
         target_path: PathBuf,
-    ) -> Result<
-        (
-            BackupJob,
-            importer_backup::BackupEngine,
-            Arc<AtomicBool>,
-            Arc<AtomicBool>,
-            bool,
-        ),
-        BackupCommandError,
-    > {
+    ) -> Result<StartedBackupJob, BackupCommandError> {
         let target_id = plan.target_id;
         let source_path = plan.source_root.clone();
         let engine = self
@@ -421,6 +457,55 @@ pub(crate) async fn prepare_backup_plan(
     })
     .await
     .map_err(|error| BackupCommandError::new("backupTaskFailed", error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn inspect_backup(
+    target_id: String,
+    target_path: PathBuf,
+    source_path: PathBuf,
+    service: tauri::State<'_, BackupService>,
+) -> Result<BackupSnapshot, BackupCommandError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        service.inspect(&target_id, target_path, source_path)
+    })
+    .await
+    .map_err(|error| BackupCommandError::new("backupTaskFailed", error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) async fn list_backup_history(
+    target_id: String,
+    target_path: PathBuf,
+    service: tauri::State<'_, BackupService>,
+) -> Result<Vec<BackupRun>, BackupCommandError> {
+    let service = service.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || service.history(&target_id, target_path))
+        .await
+        .map_err(|error| BackupCommandError::new("backupTaskFailed", error.to_string()))?
+}
+
+#[tauri::command]
+pub(crate) fn open_backup_directory(
+    target_id: String,
+    target_path: PathBuf,
+    service: tauri::State<'_, BackupService>,
+) -> Result<(), BackupCommandError> {
+    let directory = service.backup_directory(&target_id, target_path)?;
+    #[cfg(target_os = "windows")]
+    let mut command = std::process::Command::new("explorer");
+    #[cfg(target_os = "macos")]
+    let mut command = std::process::Command::new("open");
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let mut command = std::process::Command::new("xdg-open");
+    command.arg(&directory).spawn().map_err(|error| {
+        BackupCommandError::new(
+            "openBackupDirectoryFailed",
+            format!("Nie udało się otworzyć {}: {error}", directory.display()),
+        )
+    })?;
+    Ok(())
 }
 
 #[tauri::command]

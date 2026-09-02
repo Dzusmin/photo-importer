@@ -3,9 +3,12 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   cancelBackupJob,
+  inspectBackup,
+  listBackupHistory,
   listBackupJobs,
   listBackupTargets,
   normalizeBackupError,
+  openBackupDirectory,
   pauseBackupJob,
   prepareBackupPlan,
   recognizeBackupTarget,
@@ -13,8 +16,11 @@ import {
   resumeBackupJob,
   startBackupJob,
   type BackupJob,
+  type BackupFileStatus,
   type BackupPhase,
   type BackupPlan,
+  type BackupRun,
+  type BackupSnapshot,
   type BackupTarget,
 } from "../../shared/backups";
 import { loadSettings } from "../../shared/settings";
@@ -43,6 +49,10 @@ export function BackupPanel() {
   const [newTargetPath, setNewTargetPath] = useState("");
   const [newTargetLabel, setNewTargetLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [snapshot, setSnapshot] = useState<BackupSnapshot | null>(null);
+  const [history, setHistory] = useState<BackupRun[]>([]);
+  const [auditing, setAuditing] = useState(false);
+  const [auditRevision, setAuditRevision] = useState(0);
 
   const refreshVolumes = useCallback(async () => {
     const discovered = await listMediaSources();
@@ -129,7 +139,14 @@ export function BackupPanel() {
   useEffect(() => {
     let disposed = false;
     const unlisten = listen<BackupJob>("backup-progress", (event) => {
-      if (!disposed) setJob(event.payload);
+      if (!disposed) {
+        setJob(event.payload);
+        if (
+          ["completed", "failed", "cancelled"].includes(event.payload.status)
+        ) {
+          setAuditRevision((value) => value + 1);
+        }
+      }
     });
     return () => {
       disposed = true;
@@ -151,6 +168,47 @@ export function BackupPanel() {
     selectedVolume &&
     plan.totalCopyBytes > selectedVolume.availableBytes,
   );
+  const auditTargetId = selectedTarget?.id;
+  const auditTargetPath = selectedVolume?.mountPath;
+
+  useEffect(() => {
+    if (!auditTargetId || !auditTargetPath || !libraryPath || active) {
+      setSnapshot(null);
+      setHistory([]);
+      return;
+    }
+    let disposed = false;
+    setAuditing(true);
+    void Promise.all([
+      inspectBackup(auditTargetId, auditTargetPath, libraryPath),
+      listBackupHistory(auditTargetId, auditTargetPath),
+    ])
+      .then(([nextSnapshot, runs]) => {
+        if (!disposed) {
+          setSnapshot(nextSnapshot ?? null);
+          setHistory(Array.isArray(runs) ? runs : []);
+        }
+      })
+      .catch((reason) => {
+        if (!disposed) setError(normalizeBackupError(reason).message);
+      })
+      .finally(() => {
+        if (!disposed) setAuditing(false);
+      });
+    return () => {
+      disposed = true;
+    };
+  }, [active, auditRevision, auditTargetId, auditTargetPath, libraryPath]);
+
+  async function openBackup() {
+    if (!selectedTarget || !selectedVolume) return;
+    setError(null);
+    try {
+      await openBackupDirectory(selectedTarget.id, selectedVolume.mountPath);
+    } catch (reason) {
+      setError(normalizeBackupError(reason).message);
+    }
+  }
 
   async function chooseTargetDirectory() {
     const selected = await open({ directory: true, multiple: false });
@@ -372,6 +430,17 @@ export function BackupPanel() {
         )}
       </div>
 
+      {selectedTarget && (
+        <BackupOverview
+          snapshot={snapshot}
+          history={history}
+          connected={Boolean(selectedVolume)}
+          auditing={auditing}
+          onRefresh={() => setAuditRevision((value) => value + 1)}
+          onOpen={openBackup}
+        />
+      )}
+
       {!active && (
         <div className="backup-planner">
           <div className="backup-source">
@@ -417,6 +486,244 @@ export function BackupPanel() {
         />
       )}
     </section>
+  );
+}
+
+const backupStatusLabels: Record<BackupFileStatus, string> = {
+  current: "Aktualny",
+  new: "Nowy",
+  changed: "Zmieniony",
+  corrupt: "Uszkodzony",
+  missingInBackup: "Brakujący w backupie",
+  deletedFromLibrary: "Usunięty z biblioteki",
+};
+
+function BackupOverview({
+  snapshot,
+  history,
+  connected,
+  auditing,
+  onRefresh,
+  onOpen,
+}: {
+  snapshot: BackupSnapshot | null;
+  history: BackupRun[];
+  connected: boolean;
+  auditing: boolean;
+  onRefresh: () => void;
+  onOpen: () => Promise<void>;
+}) {
+  const [status, setStatus] = useState<BackupFileStatus | "all">("all");
+  const files = snapshot?.files ?? [];
+  const visible =
+    status === "all" ? files : files.filter((file) => file.status === status);
+  const count = (value: BackupFileStatus) =>
+    files.filter((file) => file.status === value).length;
+  const orphanCount = count("deletedFromLibrary");
+  const lastSuccessful =
+    snapshot?.lastSuccessfulRun ??
+    history.find((run) => run.outcome === "succeeded") ??
+    null;
+
+  return (
+    <div className="backup-overview" aria-label="Stan kopii zapasowej">
+      <div className="backup-section-heading">
+        <div>
+          <p className="section-label">ZGODNOŚĆ BIBLIOTEKI Z KOPIĄ</p>
+          <h3>Stan backupu</h3>
+          <p>
+            {lastSuccessful
+              ? `Ostatni udany backup: ${formatDate(lastSuccessful.finishedAtUnixMs ?? lastSuccessful.startedAtUnixMs)}`
+              : "Brak ukończonego backupu"}
+          </p>
+        </div>
+        <div className="button-row">
+          <button
+            type="button"
+            className="secondary"
+            disabled={!connected || auditing}
+            onClick={onRefresh}
+          >
+            {auditing ? "Sprawdzanie…" : "Sprawdź ponownie"}
+          </button>
+          <button
+            type="button"
+            className="secondary"
+            disabled={!connected}
+            onClick={() => void onOpen()}
+          >
+            Otwórz katalog kopii
+          </button>
+        </div>
+      </div>
+      {orphanCount > 0 && (
+        <div className="backup-orphan-warning" role="alert">
+          <strong>
+            {orphanCount}{" "}
+            {orphanCount === 1
+              ? "plik został usunięty"
+              : "pliki zostały usunięte"}{" "}
+            z biblioteki.
+          </strong>
+          <span>
+            {" "}
+            Nadal pozostają w backupie. Aplikacja nie usunie ich bez Twojej
+            jawnej decyzji.
+          </span>
+        </div>
+      )}
+      {snapshot && (
+        <>
+          <div
+            className="backup-status-filters"
+            aria-label="Filtr stanu plików"
+          >
+            <StatusFilter
+              label="Wszystkie"
+              value="all"
+              selected={status}
+              count={files.length}
+              onSelect={setStatus}
+            />
+            {(Object.keys(backupStatusLabels) as BackupFileStatus[]).map(
+              (value) => (
+                <StatusFilter
+                  key={value}
+                  label={backupStatusLabels[value]}
+                  value={value}
+                  selected={status}
+                  count={count(value)}
+                  onSelect={setStatus}
+                />
+              ),
+            )}
+          </div>
+          <div className="backup-file-list">
+            {visible.map((file) => (
+              <details
+                className={`backup-file backup-file--${file.status}`}
+                key={file.relativePath}
+              >
+                <summary>
+                  <span
+                    className={`backup-status backup-status--${file.status}`}
+                  >
+                    {backupStatusLabels[file.status]}
+                  </span>
+                  <code>{file.relativePath}</code>
+                  <small>
+                    {formatBytes(file.sizeBytes)} · {file.versions.length}{" "}
+                    starszych wersji
+                  </small>
+                </summary>
+                <div className="backup-file__details">
+                  <p>
+                    Aktualna kopia:{" "}
+                    <code>{file.backupSha256?.slice(0, 16) ?? "brak"}</code>
+                  </p>
+                  <p>
+                    Oczekiwany skrót:{" "}
+                    <code>
+                      {file.expectedSha256?.slice(0, 16) ??
+                        "jeszcze nie zapisano"}
+                    </code>
+                  </p>
+                  {file.versions.length > 0 && (
+                    <div>
+                      <strong>
+                        Poprzednie wersje (gotowe pod przyszłe przywracanie)
+                      </strong>
+                      <ul>
+                        {file.versions.map((version) => (
+                          <li key={version.id}>
+                            <time>{formatDate(version.archivedAtUnixMs)}</time>{" "}
+                            · <code>{version.versionPath}</code>
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
+                  )}
+                </div>
+              </details>
+            ))}
+            {visible.length === 0 && (
+              <p className="backup-empty">Brak plików o wybranym stanie.</p>
+            )}
+          </div>
+        </>
+      )}
+      <BackupHistory history={history} />
+    </div>
+  );
+}
+
+function StatusFilter({
+  label,
+  value,
+  selected,
+  count,
+  onSelect,
+}: {
+  label: string;
+  value: BackupFileStatus | "all";
+  selected: BackupFileStatus | "all";
+  count: number;
+  onSelect: (value: BackupFileStatus | "all") => void;
+}) {
+  return (
+    <button
+      type="button"
+      className={selected === value ? "active" : ""}
+      aria-pressed={selected === value}
+      onClick={() => onSelect(value)}
+    >
+      {label} <strong>{count}</strong>
+    </button>
+  );
+}
+
+function BackupHistory({ history }: { history: BackupRun[] }) {
+  return (
+    <details className="backup-history">
+      <summary>
+        Historia uruchomień <strong>{history.length}</strong>
+      </summary>
+      {history.length === 0 ? (
+        <p>Brak zapisanych uruchomień.</p>
+      ) : (
+        <ol>
+          {history.map((run) => (
+            <li key={run.id}>
+              <span className={`backup-run backup-run--${run.outcome}`}>
+                {run.outcome === "succeeded"
+                  ? "Udany"
+                  : run.outcome === "failed"
+                    ? "Nieudany"
+                    : run.outcome === "cancelled"
+                      ? "Anulowany"
+                      : "Uruchomiony"}
+              </span>
+              <div>
+                <strong>
+                  {formatDate(run.startedAtUnixMs)}
+                  {run.finishedAtUnixMs
+                    ? ` · ${formatDuration(run.finishedAtUnixMs - run.startedAtUnixMs)}`
+                    : ""}
+                </strong>
+                <code>{run.sourceRoot}</code>
+                {run.error && (
+                  <span className="backup-run__error">{run.error}</span>
+                )}
+              </div>
+              <small>
+                {run.copiedFileCount} skopiowanych · {run.unchangedFileCount}{" "}
+                aktualnych · {formatBytes(run.copiedBytes)}
+              </small>
+            </li>
+          ))}
+        </ol>
+      )}
+    </details>
   );
 }
 
@@ -637,4 +944,19 @@ function formatBytes(bytes: number): string {
     index += 1;
   }
   return `${value.toLocaleString("pl-PL", { maximumFractionDigits: 1 })} ${units[index]}`;
+}
+
+function formatDate(unixMs: number): string {
+  return new Intl.DateTimeFormat("pl-PL", {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(unixMs));
+}
+
+function formatDuration(milliseconds: number): string {
+  const seconds = Math.max(0, Math.round(milliseconds / 1000));
+  if (seconds < 60) return `${seconds} s`;
+  const minutes = Math.floor(seconds / 60);
+  const remainder = seconds % 60;
+  return `${minutes} min ${remainder} s`;
 }
