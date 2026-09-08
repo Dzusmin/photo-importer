@@ -1,15 +1,17 @@
 import { useState } from "react";
+import { useTranslation } from "react-i18next";
 import type { ActionableError } from "./appStatus";
 
 export function ErrorNotice({
   error,
   onRetry,
-  retryLabel = "Spróbuj ponownie",
+  retryLabel,
 }: {
   error: ActionableError;
   onRetry?: () => void;
   retryLabel?: string;
 }) {
+  const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
   async function copyDetails() {
@@ -43,18 +45,18 @@ export function ErrorNotice({
       </div>
       {onRetry && (
         <button type="button" className="secondary" onClick={onRetry}>
-          {retryLabel}
+          {retryLabel ?? t("common.retry")}
         </button>
       )}
       <details>
-        <summary>Szczegóły techniczne</summary>
+        <summary>{t("errorNotice.technicalDetails")}</summary>
         <pre>{error.technicalDetails}</pre>
         <button
           type="button"
           className="ghost"
           onClick={() => void copyDetails()}
         >
-          {copied ? "Skopiowano" : "Kopiuj szczegóły"}
+          {copied ? t("errorNotice.copied") : t("errorNotice.copyDetails")}
         </button>
       </details>
     </div>

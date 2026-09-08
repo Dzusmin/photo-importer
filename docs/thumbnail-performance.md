@@ -1,45 +1,52 @@
-# Wydajność miniaturek
+# Thumbnail performance
 
-## Uruchomienie pomiaru
+## Running the benchmark
 
 ```powershell
 cargo bench -p importer-thumbnails --bench thumbnail_pipeline
 ```
 
-Benchmark tworzy syntetyczny JPEG 6000 × 4000 px i mierzy osobno zimne
-generowanie oraz trafienie w cache dla rozmiarów 320 i 1600 px. Pomiary należy
-wykonywać w profilu `bench`/release; wyniki debug nie opisują wydajności gotowej
-aplikacji.
+The benchmark creates a synthetic 6000 × 4000 px JPEG and separately measures
+cold generation and a cache hit at 320 and 1600 px. Run measurements with the
+`bench`/release profile; debug results do not represent the performance of the
+finished application.
 
-## Wynik referencyjny — Windows, 1 września 2026
+## Reference result — Windows, September 1, 2026
 
-| Scenariusz                 |           Czas |
-| -------------------------- | -------------: |
-| Zimny JPEG 24 MP → 320 px  |   57,8–61,5 ms |
-| Ciepły cache 320 px        |       49–52 µs |
-| Zimny JPEG 24 MP → 1600 px | 160,8–183,7 ms |
-| Ciepły cache 1600 px       |   61,8–65,8 µs |
+| Scenario                  |           Time |
+| ------------------------- | -------------: |
+| Cold 24 MP JPEG → 320 px  |   57.8–61.5 ms |
+| Warm cache, 320 px        |       49–52 µs |
+| Cold 24 MP JPEG → 1600 px | 160.8–183.7 ms |
+| Warm cache, 1600 px       |   61.8–65.8 µs |
 
-Wyniki zależą od CPU i dysku, dlatego służą jako lokalny punkt odniesienia, a
-nie gwarancja dla wszystkich komputerów.
+Results depend on the CPU and storage device, so they serve as a local
+reference point rather than a guarantee for every computer.
 
-Tryb developerski zachowuje informacje debugowe dla aplikacji, ale kompiluje
-potok miniaturek i biblioteki kodeków z `opt-level = 3`. Bez tego sam brak
-optymalizacji wydłużał na maszynie referencyjnej generowanie miniatury 320 px
-z około 60–66 ms do około 588 ms.
+Development mode retains debug information for the application but compiles
+the thumbnail pipeline and codec libraries with `opt-level = 3`. Without it,
+the lack of optimization alone increased 320 px thumbnail generation on the
+reference machine from about 60–66 ms to about 588 ms.
 
-## Architektura
+## Architecture
 
-- JPEG jest redukowany przez skalowanie IDCT podczas dekodowania.
-- RAW korzysta najpierw z osadzonej miniatury lub podglądu.
-- Cache v2 przechowuje JPEG quality 84 i jest odtwarzalny.
-- Do czterech różnych miniaturek może powstawać równolegle.
-- Identyczne żądania współdzielą jedną pracę.
-- SQLite jest utrzymywany w jednym połączeniu, a rozmiar cache w liczniku.
-- WebView otrzymuje URL asset zamiast tablicy bajtów serializowanej do JSON.
-- Kolejka frontendu preferuje pełny podgląd i usuwa niewidoczne, jeszcze
-  nierozpoczęte zadania.
+- JPEG uses the embedded EXIF thumbnail first; when one is unavailable, the
+  image is reduced through IDCT scaling during decoding.
+- RAW uses an embedded thumbnail or preview first.
+- Cache v3 stores JPEG quality 84 and can be rebuilt.
+- Up to four different thumbnails can be generated concurrently.
+- Identical requests share a single job.
+- SQLite uses a single persistent connection, and cache size is tracked by a
+  counter.
+- The WebView receives an asset URL instead of a byte array serialized to JSON.
+- The frontend queue prioritizes the full preview and removes invisible jobs
+  that have not yet started.
+- A full JPEG preview exposes the original file without creating another cache
+  version. RAW still receives a 1600 px preview generated from the embedded
+  image.
+- Event cards outside the viewport use `content-visibility`, allowing the
+  WebView to skip their layout and rendering.
 
-Każda odpowiedź backendu zawiera czasy lookup, decode, resize, encode/persist,
-database oraz total. Ostatnie 200 próbek można odczytać przez
+Every backend response contains lookup, decode, resize, encode/persist,
+database, and total timings. The latest 200 samples can be retrieved through
 `getThumbnailPerformanceSnapshot()`.

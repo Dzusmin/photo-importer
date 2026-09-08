@@ -1,4 +1,5 @@
 import { invoke } from "@tauri-apps/api/core";
+import { i18n } from "../i18n/instance";
 
 export interface BackupTarget {
   id: string;
@@ -29,6 +30,7 @@ export interface BackupPlan {
 export interface BackupCommandError {
   code: string;
   message: string;
+  technicalDetails?: string;
 }
 
 export type BackupJobStatus =
@@ -61,6 +63,28 @@ export interface BackupJob {
   updatedAtUnixMs: number;
   error: string | null;
   report: BackupReport | null;
+}
+
+export type BackupPlanningJobStatus =
+  "running" | "completed" | "failed" | "cancelled";
+
+export interface BackupPlanningJob {
+  id: string;
+  targetId: string;
+  sourcePath: string;
+  targetPath: string;
+  status: BackupPlanningJobStatus;
+  phase: "scanningLibrary" | "hashing";
+  processedFileCount: number;
+  totalFileCount: number | null;
+  processedBytes: number;
+  totalBytes: number | null;
+  currentPath: string | null;
+  cancelRequested: boolean;
+  startedAtUnixMs: number;
+  updatedAtUnixMs: number;
+  error: string | null;
+  plan: BackupPlan | null;
 }
 
 export type BackupRunOutcome = "running" | "succeeded" | "failed" | "cancelled";
@@ -137,16 +161,26 @@ export function removeBackupTarget(targetId: string): Promise<void> {
   return invoke<void>("remove_backup_target", { targetId });
 }
 
-export function prepareBackupPlan(
+export function startBackupPlanningJob(
   targetId: string,
   targetPath: string,
   sourcePath: string,
-): Promise<BackupPlan> {
-  return invoke<BackupPlan>("prepare_backup_plan", {
+): Promise<BackupPlanningJob> {
+  return invoke<BackupPlanningJob>("start_backup_planning_job", {
     targetId,
     targetPath,
     sourcePath,
   });
+}
+
+export function listBackupPlanningJobs(): Promise<BackupPlanningJob[]> {
+  return invoke<BackupPlanningJob[]>("list_backup_planning_jobs");
+}
+
+export function cancelBackupPlanningJob(
+  jobId: string,
+): Promise<BackupPlanningJob> {
+  return invoke<BackupPlanningJob>("cancel_backup_planning_job", { jobId });
 }
 
 export function startBackupJob(
@@ -214,32 +248,32 @@ export function normalizeBackupError(error: unknown): BackupCommandError {
     ) {
       return {
         code: candidate.code,
-        message: friendlyBackupMessages[candidate.code] ?? candidate.message,
+        message: backupErrorMessage(candidate.code),
+        technicalDetails: candidate.technicalDetails ?? candidate.message,
       };
     }
   }
   return {
     code: "unknown",
-    message:
-      typeof error === "string" ? error : "Wystąpił nieznany błąd backupu.",
+    message: i18n.t("commandErrors.backupFailed"),
+    technicalDetails:
+      typeof error === "string" ? error : i18n.t("errors.noDetails"),
   };
 }
 
-const friendlyBackupMessages: Record<string, string> = {
-  invalidTargetPath: "Wybrany dysk backupu nie jest dostępny.",
-  invalidSourcePath:
-    "Katalog biblioteki nie jest dostępny. Sprawdź go w ustawieniach.",
-  overlappingBackupRoots:
-    "Biblioteka i cel backupu nie mogą znajdować się wewnątrz siebie.",
-  wrongBackupTarget:
-    "Pod wskazaną ścieżką znajduje się inny dysk. Odłącz go i podłącz właściwy cel backupu.",
-  invalidTargetMarker:
-    "Nie można odczytać identyfikatora dysku backupu. Nie zapisano żadnych plików.",
-  backupSourceChanged:
-    "Plik źródłowy zmienił się podczas backupu. Przygotuj nowy plan i spróbuj ponownie.",
-  backupVerificationFailed:
-    "Skopiowany plik nie przeszedł weryfikacji. Oryginalny plik pozostał bez zmian.",
-  backupIoFailed:
-    "Nie udało się odczytać lub zapisać pliku. Sprawdź, czy dysk jest podłączony i ma wolne miejsce.",
-  openBackupDirectoryFailed: "Nie udało się otworzyć katalogu kopii.",
-};
+const SPECIFIC_BACKUP_ERROR_CODES = new Set([
+  "invalidTargetPath",
+  "invalidSourcePath",
+  "overlappingBackupRoots",
+  "wrongBackupTarget",
+  "invalidTargetMarker",
+  "backupSourceChanged",
+  "backupVerificationFailed",
+  "backupIoFailed",
+  "openBackupDirectoryFailed",
+]);
+
+function backupErrorMessage(code: string): string {
+  const key = SPECIFIC_BACKUP_ERROR_CODES.has(code) ? code : "backupFailed";
+  return i18n.t(`commandErrors.${key}`);
+}

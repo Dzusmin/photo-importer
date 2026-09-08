@@ -20,6 +20,18 @@ const ALLOWED_TEMPLATE_VARIABLES: &[&str] = &[
     "camera_alias",
     "source_alias",
 ];
+const ALLOWED_FILE_NAME_VARIABLES: &[&str] = &[
+    "year",
+    "month",
+    "day",
+    "date",
+    "event_name",
+    "camera_make",
+    "camera_model",
+    "camera_alias",
+    "source_alias",
+    "original_name",
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsValidationErrorCode {
@@ -86,6 +98,14 @@ impl AppSettings {
         if let Err(message) = validate_folder_template(&self.portable.naming.folder_template) {
             errors.push(error(
                 "portable.naming.folderTemplate",
+                SettingsValidationErrorCode::InvalidTemplate,
+                message,
+            ));
+        }
+        if let Err(message) = validate_file_name_template(&self.portable.naming.file_name_template)
+        {
+            errors.push(error(
+                "portable.naming.fileNameTemplate",
                 SettingsValidationErrorCode::InvalidTemplate,
                 message,
             ));
@@ -274,6 +294,52 @@ fn validate_folder_template(template: &str) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_file_name_template(template: &str) -> Result<(), String> {
+    if template.trim().is_empty() {
+        return Err("file name template cannot be empty".to_owned());
+    }
+    if template.contains(['/', '\\']) {
+        return Err("file name template cannot contain path separators".to_owned());
+    }
+
+    let mut characters = template.chars().peekable();
+    while let Some(character) = characters.next() {
+        match character {
+            '{' => {
+                let mut variable = String::new();
+                let mut closed = false;
+                for inner in characters.by_ref() {
+                    match inner {
+                        '}' => {
+                            closed = true;
+                            break;
+                        }
+                        '{' => return Err("nested opening brace in file name template".to_owned()),
+                        _ => variable.push(inner),
+                    }
+                }
+                if !closed {
+                    return Err("unclosed variable in file name template".to_owned());
+                }
+                let valid = ALLOWED_FILE_NAME_VARIABLES.contains(&variable.as_str())
+                    || variable.strip_prefix("counter:").is_some_and(|width| {
+                        width.len() == 2
+                            && width.starts_with('0')
+                            && matches!(width.as_bytes()[1], b'1'..=b'9')
+                    });
+                if !valid {
+                    return Err(format!(
+                        "unknown file name template variable: {{{variable}}}"
+                    ));
+                }
+            }
+            '}' => return Err("closing brace without an opening brace".to_owned()),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
 fn error(
     path: impl Into<String>,
     code: SettingsValidationErrorCode,
@@ -356,6 +422,19 @@ mod tests {
         let errors = settings.validate().expect_err("settings should be invalid");
 
         assert!(errors.contains_code(SettingsValidationErrorCode::InvalidTemplate));
+    }
+
+    #[test]
+    fn validates_file_name_template_and_formatted_counter() {
+        let mut settings = AppSettings::default();
+        settings.portable.naming.file_name_template =
+            "{date}_{event_name}_{camera_alias}_{counter:04}_{original_name}".to_owned();
+        assert_eq!(settings.validate(), Ok(()));
+
+        for template in ["../photo", "{counter}", "{counter:00}", "{unknown}"] {
+            settings.portable.naming.file_name_template = template.to_owned();
+            assert!(settings.validate().is_err(), "{template} should be invalid");
+        }
     }
 
     #[test]

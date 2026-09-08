@@ -20,9 +20,11 @@ const ignoreHealthChange = () => undefined;
 export function BackgroundMonitor({
   appStatus = "ready",
   onHealthChange = ignoreHealthChange,
+  mode = "full",
 }: {
   appStatus?: AppStatus;
   onHealthChange?: (healthy: boolean) => void;
+  mode?: "compact" | "full";
 } = {}) {
   const [status, setStatus] = useState<BackgroundStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
@@ -77,7 +79,10 @@ export function BackgroundMonitor({
   }
 
   return (
-    <section className="background-monitor" aria-live="polite">
+    <section
+      className={`background-monitor background-monitor--${mode}`}
+      aria-live="polite"
+    >
       <div className="background-monitor__summary">
         <span
           className={`automation-dot ${status?.running ? "automation-dot--active" : ""}`}
@@ -121,59 +126,62 @@ export function BackgroundMonitor({
           {refreshing ? "Sprawdzanie…" : "Sprawdź teraz"}
         </button>
       </div>
-      {loadError !== null && (
+      {mode === "full" && loadError !== null && (
         <ErrorNotice
           error={describeOperationalError(loadError, "read")}
           onRetry={() => void refresh()}
         />
       )}
-      {status?.lastError && (
+      {mode === "full" && status?.lastError && (
         <ErrorNotice
           error={describeOperationalError(status.lastError, "read")}
           onRetry={() => void refresh()}
         />
       )}
-      {status?.pendingSources.map((source) => (
-        <div className="background-monitor__event" key={source.fingerprint}>
-          <span>SD</span>
-          <div>
-            <strong>{source.name} czeka na decyzję</strong>
-            <small>{source.sourcePath}</small>
-            {source.probableMatch && (
-              <small>
-                Tożsamość karty zmieniła się — wymagane potwierdzenie.
-              </small>
-            )}
+      {mode === "full" &&
+        status?.pendingSources.map((source) => (
+          <div className="background-monitor__event" key={source.fingerprint}>
+            <span>SD</span>
+            <div>
+              <strong>{source.name} czeka na decyzję</strong>
+              <small>{source.sourcePath}</small>
+              {source.probableMatch && (
+                <small>
+                  Tożsamość karty zmieniła się — wymagane potwierdzenie.
+                </small>
+              )}
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                void startSourceWorkflow(source.sourcePath);
+                void acknowledgePendingSource(source.sourcePath).then(
+                  setStatus,
+                );
+              }}
+            >
+              Skanuj i przygotuj plan
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() =>
+                void ignoreSourceUntilDisconnect(source.sourcePath).then(
+                  setStatus,
+                )
+              }
+            >
+              Tym razem ignoruj
+            </button>
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => void emit("open-settings")}
+            >
+              Zmień zachowanie tej karty
+            </button>
           </div>
-          <button
-            type="button"
-            onClick={() => {
-              void startSourceWorkflow(source.sourcePath);
-              void acknowledgePendingSource(source.sourcePath).then(setStatus);
-            }}
-          >
-            Skanuj i przygotuj plan
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() =>
-              void ignoreSourceUntilDisconnect(source.sourcePath).then(
-                setStatus,
-              )
-            }
-          >
-            Tym razem ignoruj
-          </button>
-          <button
-            type="button"
-            className="ghost"
-            onClick={() => void emit("open-settings")}
-          >
-            Zmień zachowanie tej karty
-          </button>
-        </div>
-      ))}
+        ))}
       {status?.events[0] && (
         <div className="background-monitor__event">
           <span>{eventIcon(status.events[0].kind)}</span>

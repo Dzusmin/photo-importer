@@ -36,11 +36,13 @@ describe("App", () => {
     const user = userEvent.setup();
     render(<App />);
 
-    expect(await screen.findByText("Gotowa")).toBeInTheDocument();
+    expect((await screen.findAllByText("Ready")).length).toBeGreaterThan(0);
     expect(screen.getByText("scanner-test")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Activity" }));
+    expect(screen.getByText("monitor-test")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Backup" }));
     expect(screen.getByText("backup-test")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Ustawienia" }));
+    await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByText("settings-test")).toBeInTheDocument();
     expect(screen.queryByText("scanner-test")).not.toBeInTheDocument();
   });
@@ -49,6 +51,8 @@ describe("App", () => {
     getSystemStatus.mockResolvedValue(null);
     render(<App />);
 
-    expect(await screen.findByText("Brak połączenia")).toBeInTheDocument();
+    expect((await screen.findAllByText("Disconnected")).length).toBeGreaterThan(
+      0,
+    );
   });
 });

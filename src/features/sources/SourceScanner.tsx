@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
+import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   loadSettings,
   normalizeSettingsError,
@@ -10,6 +11,7 @@ import {
 import { acknowledgePendingSource } from "../../shared/background";
 import {
   buildImportPlanPreview,
+  allowOriginalJpegPreview,
   announceImportPlanReady,
   deletePendingSourceWorkflow,
   cancelMediaScan,
@@ -22,11 +24,13 @@ import {
   listMediaSources,
   listImportSessions,
   listPendingSourceWorkflows,
+  listPhotoUserMetadata,
   listMediaScans,
   pauseImportSession,
   startMediaScan,
   startImportSession,
   savePendingSourceWorkflow,
+  savePhotoUserMetadata,
   createImportSession,
   retryImportRollback,
   type SourceScanResponse,
@@ -35,8 +39,10 @@ import {
   type ImportSession,
   type MediaItem,
   type MediaScanJob,
+  type StreamedScanItems,
   type CameraIdentity,
   type PendingSourceWorkflow,
+  type PhotoUserMetadataUpdate,
 } from "../../shared/sources";
 
 interface CameraProfileDraft {
@@ -67,6 +73,9 @@ export function SourceScanner({
   const [scanningPath, setScanningPath] = useState<string | null>(null);
   const [scanJob, setScanJob] = useState<MediaScanJob | null>(null);
   const [scanResult, setScanResult] = useState<SourceScanResponse | null>(null);
+  const [streamedScans, setStreamedScans] = useState<
+    Record<string, { path: string; items: MediaItem[] }>
+  >({});
   const [message, setMessage] = useState<string | null>(null);
   const [discoveryError, setDiscoveryError] = useState<unknown>(null);
   const [discoveryComplete, setDiscoveryComplete] = useState(false);
@@ -82,10 +91,23 @@ export function SourceScanner({
     "seconds" | "minutes" | "hours"
   >("minutes");
   const [resultFilter, setResultFilter] = useState<"all" | "new">("all");
+  const [ratingFilter, setRatingFilter] = useState(0);
+  const [rejectionFilter, setRejectionFilter] = useState<
+    "all" | "kept" | "rejected"
+  >("all");
+  const [userMetadata, setUserMetadata] = useState<
+    Record<string, PhotoUserMetadataUpdate>
+  >({});
+  const [metadataLoadedFor, setMetadataLoadedFor] = useState<string | null>(
+    null,
+  );
   const [excludedImportKeys, setExcludedImportKeys] = useState<Set<string>>(
     new Set(),
   );
   const [eventNames, setEventNames] = useState<Record<number, string>>({});
+  const [expandedEventIndexes, setExpandedEventIndexes] = useState<Set<number>>(
+    new Set(),
+  );
   const [importPlan, setImportPlan] = useState<ImportPlan | null>(null);
   const [planning, setPlanning] = useState(false);
   const [importSession, setImportSession] = useState<ImportSession | null>(
@@ -97,6 +119,8 @@ export function SourceScanner({
     PendingSourceWorkflow[]
   >([]);
   const autoPlannedRoot = useRef<string | null>(null);
+  const metadataSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const metadataLoadGeneration = useRef(0);
   const cameraSources = useMemo(
     () => sources.filter((source) => source.likelyCameraSource),
     [sources],
@@ -108,6 +132,37 @@ export function SourceScanner({
     void loadSettings()
       .then((response) => setSettings(response.settings))
       .catch((error) => setMessage(normalizeSettingsError(error).message));
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<StreamedScanItems>("scan-items", (event) => {
+      if (!active) return;
+      setStreamedScans((current) => {
+        const currentScan = current[event.payload.scanId];
+        const byKey = new Map(
+          currentScan?.path === event.payload.path
+            ? currentScan.items.map((item) => [item.key, item])
+            : [],
+        );
+        for (const item of event.payload.items) byKey.set(item.key, item);
+        return {
+          ...current,
+          [event.payload.scanId]: {
+            path: event.payload.path,
+            items: [...byKey.values()].sort(
+              (left, right) =>
+                left.capturedAtUnixMs - right.capturedAtUnixMs ||
+                left.key.localeCompare(right.key),
+            ),
+          },
+        };
+      });
+    });
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop());
+    };
   }, []);
 
   useEffect(() => {
@@ -227,7 +282,13 @@ export function SourceScanner({
   }, [scanResult, settings]);
 
   useEffect(() => {
-    if (!scanResult || !settings || profileDrafts?.length !== 0 || importPlan)
+    if (
+      !scanResult ||
+      !settings ||
+      profileDrafts?.length !== 0 ||
+      importPlan ||
+      metadataLoadedFor !== scanResult.scan.root
+    )
       return;
     const source = sources.find(
       (candidate) => candidate.mountPath === scanResult.scan.root,
@@ -240,7 +301,14 @@ export function SourceScanner({
       autoPlannedRoot.current = scanResult.scan.root;
       void prepareImportPlan(true);
     }
-  }, [profileDrafts, importPlan, scanResult, settings, sources]);
+  }, [
+    profileDrafts,
+    importPlan,
+    metadataLoadedFor,
+    scanResult,
+    settings,
+    sources,
+  ]);
 
   useEffect(() => {
     let active = true;
@@ -266,7 +334,7 @@ export function SourceScanner({
       const job = event.payload;
       setScanJob(job);
       if (job.status === "completed" && job.result) {
-        applyCompletedScan(job.result);
+        applyCompletedScan(job.result, job.id);
         setScanningPath(null);
       } else if (job.status === "failed") {
         setMessage(job.error ?? "Skanowanie nie powiodło się.");
@@ -353,9 +421,14 @@ export function SourceScanner({
   async function runScan(path: string, initialMessage?: string) {
     setScanningPath(path);
     setScanResult(null);
+    setStreamedScans({});
     setProfileDrafts(null);
     setWriteSourceMarker(true);
     setItemProfileAssignments({});
+    setUserMetadata({});
+    setMetadataLoadedFor(null);
+    metadataLoadGeneration.current += 1;
+    setExpandedEventIndexes(new Set());
     autoPlannedRoot.current = null;
     setSelectedKeys(new Set());
     setMessage(initialMessage ?? "Skanowanie źródła…");
@@ -368,9 +441,15 @@ export function SourceScanner({
     }
   }
 
-  function applyCompletedScan(result: SourceScanResponse) {
+  function applyCompletedScan(result: SourceScanResponse, scanId: string) {
     setScanResult(result);
+    setStreamedScans((current) => {
+      const next = { ...current };
+      delete next[scanId];
+      return next;
+    });
     setEventNames(defaultEventNames(result.events));
+    setExpandedEventIndexes(new Set());
     setExcludedImportKeys(
       new Set(
         result.importMatches
@@ -379,6 +458,7 @@ export function SourceScanner({
       ),
     );
     setImportPlan(null);
+    void hydrateUserMetadata(result.scan.root);
     setMessage(
       result.scan.items.length === 0
         ? "Nie znaleziono obsługiwanych zdjęć ani filmów."
@@ -388,17 +468,23 @@ export function SourceScanner({
 
   function openWorkflow(workflow: PendingSourceWorkflow) {
     if (!workflow.scan) return;
+    setUserMetadata({});
+    setMetadataLoadedFor(null);
     const settingsChanged =
       settings !== null &&
       workflow.settingsRevision !== "" &&
       workflow.settingsRevision !== JSON.stringify(settings.portable.naming);
     setScanResult(workflow.scan);
+    void hydrateUserMetadata(workflow.scan.scan.root);
     setEventNames({
       ...defaultEventNames(workflow.scan.events),
       ...workflow.editor.eventNames,
     });
     setExcludedImportKeys(new Set(workflow.editor.excludedItemKeys));
     setItemProfileAssignments(workflow.editor.itemProfileAssignments);
+    setExpandedEventIndexes(
+      new Set(workflow.editor.expandedEventIndexes ?? []),
+    );
     setImportPlan(settingsChanged ? null : workflow.plan);
     setProfileDrafts(
       workflow.state === "awaitingProfileConfirmation" ? null : [],
@@ -412,7 +498,53 @@ export function SourceScanner({
     );
   }
 
-  function invalidatePlan(result: SourceScanResponse | null = scanResult) {
+  async function hydrateUserMetadata(sourceRoot: string) {
+    const generation = ++metadataLoadGeneration.current;
+    try {
+      const records = (await listPhotoUserMetadata(sourceRoot)) ?? [];
+      if (generation !== metadataLoadGeneration.current) return;
+      setUserMetadata(
+        Object.fromEntries(
+          records.map((record) => [
+            record.itemKey,
+            {
+              itemKey: record.itemKey,
+              rating: record.rating,
+              rejected: record.rejected,
+              rotationDegrees: record.rotationDegrees,
+            },
+          ]),
+        ),
+      );
+      setMetadataLoadedFor(sourceRoot);
+    } catch (error) {
+      if (generation !== metadataLoadGeneration.current) return;
+      setMetadataLoadedFor(sourceRoot);
+      setMessage(normalizeSettingsError(error).message);
+    }
+  }
+
+  function updateUserMetadata(updates: PhotoUserMetadataUpdate[]) {
+    if (!scanResult || updates.length === 0) return;
+    setUserMetadata((current) => ({
+      ...current,
+      ...Object.fromEntries(updates.map((update) => [update.itemKey, update])),
+    }));
+    setImportPlan(null);
+    const sourceRoot = scanResult.scan.root;
+    metadataSaveQueue.current = metadataSaveQueue.current
+      .catch(() => undefined)
+      .then(() => savePhotoUserMetadata(sourceRoot, updates))
+      .catch((error) => {
+        setMessage(normalizeSettingsError(error).message);
+        void hydrateUserMetadata(sourceRoot);
+      });
+  }
+
+  function invalidatePlan(
+    result: SourceScanResponse | null = scanResult,
+    expandedIndexes: Set<number> = expandedEventIndexes,
+  ) {
     setImportPlan(null);
     if (!result) return;
     const source = sources.find(
@@ -440,10 +572,68 @@ export function SourceScanner({
         eventNames,
         excludedItemKeys: [...excludedImportKeys],
         itemProfileAssignments,
+        expandedEventIndexes: [...expandedIndexes],
       },
       updatedAtUnixMs: Date.now(),
       error: null,
     });
+  }
+
+  function updateExpandedEvents(next: Set<number>) {
+    setExpandedEventIndexes(next);
+    if (!scanResult) return;
+
+    const existing = pendingWorkflows.find(
+      (workflow) => workflow.sourceRoot === scanResult.scan.root,
+    );
+    const source = sources.find(
+      (candidate) => candidate.mountPath === scanResult.scan.root,
+    );
+    const workflow: PendingSourceWorkflow = {
+      sourceId:
+        existing?.sourceId ??
+        source?.markerUuid ??
+        source?.fingerprint ??
+        scanResult.scan.root,
+      sourceRoot: scanResult.scan.root,
+      sourceIdentity:
+        existing?.sourceIdentity ??
+        (source
+          ? {
+              markerUuid: source.markerUuid,
+              platformVolumeId: source.platformVolumeId,
+              fallbackFingerprint: source.fingerprint,
+            }
+          : null),
+      displayName:
+        existing?.displayName ??
+        source?.name ??
+        displayFileName(scanResult.scan.root),
+      state: existing?.state ?? (importPlan ? "planReady" : "preparingPlan"),
+      scan: scanResult,
+      plan: importPlan,
+      settingsSchemaVersion:
+        existing?.settingsSchemaVersion ?? settings?.schemaVersion ?? 0,
+      settingsRevision:
+        existing?.settingsRevision ??
+        (settings ? JSON.stringify(settings.portable.naming) : ""),
+      editor: {
+        eventNames,
+        excludedItemKeys: [...excludedImportKeys],
+        itemProfileAssignments,
+        expandedEventIndexes: [...next],
+      },
+      error: existing?.error ?? null,
+      updatedAtUnixMs: Date.now(),
+    };
+
+    setPendingWorkflows((current) => [
+      workflow,
+      ...current.filter(
+        (candidate) => candidate.sourceRoot !== workflow.sourceRoot,
+      ),
+    ]);
+    void savePendingSourceWorkflow(workflow);
   }
 
   async function confirmDetectedProfiles() {
@@ -560,7 +750,9 @@ export function SourceScanner({
         ...defaultEventNames(response.events),
         ...current,
       }));
-      invalidatePlan(correctedResult);
+      const noExpandedEvents = new Set<number>();
+      setExpandedEventIndexes(noExpandedEvents);
+      invalidatePlan(correctedResult, noExpandedEvents);
       setMessage(
         `Skorygowano czas ${response.changedItemCount} pozycji i ponownie pogrupowano wydarzenia.`,
       );
@@ -589,6 +781,10 @@ export function SourceScanner({
 
   async function prepareImportPlan(automatic = false) {
     if (!scanResult || !settings) return;
+    if (metadataLoadedFor !== scanResult.scan.root) {
+      setMessage("Poczekaj na wczytanie ocen i statusów zdjęć.");
+      return;
+    }
     if (profileDrafts && profileDrafts.length > 0) {
       setMessage("Najpierw zatwierdź profile aparatów znalezione na karcie.");
       return;
@@ -630,7 +826,14 @@ export function SourceScanner({
           event,
           name: eventNames[event.index] ?? `wydarzenie-${event.index}`,
         })),
-        excludedItemKeys: [...excludedImportKeys],
+        excludedItemKeys: [
+          ...new Set([
+            ...excludedImportKeys,
+            ...Object.values(userMetadata)
+              .filter((metadata) => metadata.rejected)
+              .map((metadata) => metadata.itemKey),
+          ]),
+        ],
         excludedSourcePaths: importedSourcePaths,
         context: {
           cameraMake: null,
@@ -666,6 +869,7 @@ export function SourceScanner({
             eventNames,
             excludedItemKeys: [...excludedImportKeys],
             itemProfileAssignments,
+            expandedEventIndexes: [...expandedEventIndexes],
           },
           error: null,
           updatedAtUnixMs: Date.now(),
@@ -742,6 +946,26 @@ export function SourceScanner({
     }
   }
 
+  async function deleteImportPlan() {
+    if (!scanResult || !importPlan) return;
+    setImportActionPending(true);
+    try {
+      await deletePendingSourceWorkflow(scanResult.scan.root);
+      setPendingWorkflows((current) =>
+        current.filter(
+          (workflow) => workflow.sourceRoot !== scanResult.scan.root,
+        ),
+      );
+      autoPlannedRoot.current = scanResult.scan.root;
+      setImportPlan(null);
+      setMessage("Plan importu został usunięty.");
+    } catch (error) {
+      setMessage(normalizeSettingsError(error).message);
+    } finally {
+      setImportActionPending(false);
+    }
+  }
+
   async function controlImport(action: "resume" | "pause" | "cancel") {
     if (!importSession) return;
     setImportActionPending(true);
@@ -789,7 +1013,9 @@ export function SourceScanner({
 
   return (
     <>
-      <ImportJourney currentStep={journeyStep} finished={journeyFinished} />
+      {(journeyStep > 0 || journeyFinished) && (
+        <ImportJourney currentStep={journeyStep} finished={journeyFinished} />
+      )}
       <section className="source-hero">
         <div>
           <p className="section-label">ŹRÓDŁA MEDIÓW</p>
@@ -884,7 +1110,13 @@ export function SourceScanner({
       )}
 
       {scanJob?.status === "running" && (
-        <ScanProgressPanel job={scanJob} onCancel={() => void cancelScan()} />
+        <>
+          <ScanProgressPanel job={scanJob} onCancel={() => void cancelScan()} />
+          {streamedScans[scanJob.id]?.path === scanJob.path &&
+            streamedScans[scanJob.id].items.length > 0 && (
+              <StreamingScanPreview items={streamedScans[scanJob.id].items} />
+            )}
+        </>
       )}
 
       {cameraSources.length > 0 && (
@@ -964,6 +1196,12 @@ export function SourceScanner({
             busy={scanningPath !== null}
             filter={resultFilter}
             onFilterChange={setResultFilter}
+            ratingFilter={ratingFilter}
+            onRatingFilterChange={setRatingFilter}
+            rejectionFilter={rejectionFilter}
+            onRejectionFilterChange={setRejectionFilter}
+            userMetadata={userMetadata}
+            onUserMetadataChange={updateUserMetadata}
             excludedImportKeys={excludedImportKeys}
             onExcludedImportKeysChange={(keys) => {
               setExcludedImportKeys(keys);
@@ -974,9 +1212,12 @@ export function SourceScanner({
               setEventNames((current) => ({ ...current, [index]: name }));
               invalidatePlan();
             }}
+            expandedEventIndexes={expandedEventIndexes}
+            onExpandedEventIndexesChange={updateExpandedEvents}
             importPlan={importPlan}
             planning={planning}
             onPrepareImportPlan={() => void prepareImportPlan(false)}
+            onDeleteImportPlan={() => void deleteImportPlan()}
             importSession={importSession}
             importActionPending={importActionPending}
             onBeginImport={() => void beginImport()}
@@ -1151,13 +1392,22 @@ function ScanResults({
   busy,
   filter,
   onFilterChange,
+  ratingFilter,
+  onRatingFilterChange,
+  rejectionFilter,
+  onRejectionFilterChange,
+  userMetadata,
+  onUserMetadataChange,
   excludedImportKeys,
   onExcludedImportKeysChange,
   eventNames,
   onEventNameChange,
+  expandedEventIndexes,
+  onExpandedEventIndexesChange,
   importPlan,
   planning,
   onPrepareImportPlan,
+  onDeleteImportPlan,
   importSession,
   importActionPending,
   onBeginImport,
@@ -1179,13 +1429,22 @@ function ScanResults({
   busy: boolean;
   filter: "all" | "new";
   onFilterChange: (filter: "all" | "new") => void;
+  ratingFilter: number;
+  onRatingFilterChange: (rating: number) => void;
+  rejectionFilter: "all" | "kept" | "rejected";
+  onRejectionFilterChange: (filter: "all" | "kept" | "rejected") => void;
+  userMetadata: Record<string, PhotoUserMetadataUpdate>;
+  onUserMetadataChange: (updates: PhotoUserMetadataUpdate[]) => void;
   excludedImportKeys: Set<string>;
   onExcludedImportKeysChange: (keys: Set<string>) => void;
   eventNames: Record<number, string>;
   onEventNameChange: (index: number, name: string) => void;
+  expandedEventIndexes: Set<number>;
+  onExpandedEventIndexesChange: (indexes: Set<number>) => void;
   importPlan: ImportPlan | null;
   planning: boolean;
   onPrepareImportPlan: () => void;
+  onDeleteImportPlan: () => void;
   importSession: ImportSession | null;
   importActionPending: boolean;
   onBeginImport: () => void;
@@ -1203,13 +1462,28 @@ function ScanResults({
   const importedCount = result.importMatches.filter(
     (match) => match.state === "imported",
   ).length;
+  const metadataFor = (key: string): PhotoUserMetadataUpdate =>
+    userMetadata[key] ?? {
+      itemKey: key,
+      rating: 0,
+      rejected: false,
+      rotationDegrees: 0,
+    };
   const visibleEvents = result.events
     .map((event) => ({
       ...event,
-      items: event.items.filter(
-        (item) =>
-          filter === "all" || matches.get(item.key)?.state !== "imported",
-      ),
+      coverItem: event.items[0],
+      items: event.items.filter((item) => {
+        const metadata = metadataFor(item.key);
+        return (
+          (filter === "all" || matches.get(item.key)?.state !== "imported") &&
+          (ratingFilter === 0 || metadata.rating >= ratingFilter) &&
+          (rejectionFilter === "all" ||
+            (rejectionFilter === "rejected"
+              ? metadata.rejected
+              : !metadata.rejected))
+        );
+      }),
     }))
     .filter((event) => event.items.length > 0);
   const visibleItems = visibleEvents.flatMap((event) => event.items);
@@ -1242,6 +1516,40 @@ function ScanResults({
       else next.add(item.key);
     }
     onExcludedImportKeysChange(next);
+  }
+
+  function toggleEvent(index: number) {
+    const next = new Set(expandedEventIndexes);
+    if (next.has(index)) next.delete(index);
+    else next.add(index);
+    onExpandedEventIndexesChange(next);
+  }
+
+  function updateMetadata(
+    key: string,
+    patch: Partial<Omit<PhotoUserMetadataUpdate, "itemKey">>,
+  ) {
+    onUserMetadataChange([{ ...metadataFor(key), ...patch }]);
+  }
+
+  function updateSelected(
+    patch: (
+      metadata: PhotoUserMetadataUpdate,
+    ) => Partial<Omit<PhotoUserMetadataUpdate, "itemKey">>,
+  ) {
+    onUserMetadataChange(
+      [...selectedKeys].map((key) => {
+        const metadata = metadataFor(key);
+        return { ...metadata, ...patch(metadata) };
+      }),
+    );
+  }
+
+  function headingContainsControl(target: EventTarget | null) {
+    return (
+      target instanceof Element &&
+      target.closest("button, input, label, select, textarea, a") !== null
+    );
   }
 
   return (
@@ -1297,6 +1605,33 @@ function ScanResults({
           >
             Tylko nowe
           </button>
+          <select
+            aria-label="Minimalna ocena"
+            value={ratingFilter}
+            onChange={(event) =>
+              onRatingFilterChange(Number(event.target.value))
+            }
+          >
+            <option value={0}>Dowolna ocena</option>
+            {[1, 2, 3, 4, 5].map((rating) => (
+              <option value={rating} key={rating}>
+                {rating}+ ★
+              </option>
+            ))}
+          </select>
+          <select
+            aria-label="Status odrzucenia"
+            value={rejectionFilter}
+            onChange={(event) =>
+              onRejectionFilterChange(
+                event.target.value as typeof rejectionFilter,
+              )
+            }
+          >
+            <option value="all">Każdy status</option>
+            <option value="kept">Bez odrzuconych</option>
+            <option value="rejected">Do odrzucenia</option>
+          </select>
         </div>
         <div className="time-correction">
           <strong>{selectedKeys.size} zaznaczonych</strong>
@@ -1340,160 +1675,358 @@ function ScanResults({
           )}
         </div>
       </div>
+      {selectedKeys.size > 0 && (
+        <div
+          className="metadata-bulk"
+          aria-label="Operacje zbiorcze metadanych"
+        >
+          <strong>Metadane dla {selectedKeys.size} pozycji:</strong>
+          <select
+            aria-label="Ustaw ocenę zaznaczonych"
+            defaultValue=""
+            onChange={(event) => {
+              if (event.target.value === "") return;
+              const rating = Number(event.target.value);
+              updateSelected(() => ({ rating }));
+              event.target.value = "";
+            }}
+          >
+            <option value="" disabled>
+              Ustaw ocenę…
+            </option>
+            {[0, 1, 2, 3, 4, 5].map((rating) => (
+              <option value={rating} key={rating}>
+                {rating} ★
+              </option>
+            ))}
+          </select>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => updateSelected(() => ({ rejected: true }))}
+          >
+            Odrzuć
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() => updateSelected(() => ({ rejected: false }))}
+          >
+            Przywróć
+          </button>
+          <button
+            type="button"
+            className="ghost"
+            onClick={() =>
+              updateSelected((metadata) => ({
+                rotationDegrees: ((metadata.rotationDegrees + 90) % 360) as
+                  0 | 90 | 180 | 270,
+              }))
+            }
+          >
+            Obróć o 90°
+          </button>
+        </div>
+      )}
+      <div
+        className="event-list-controls"
+        role="group"
+        aria-label="Widok wydarzeń"
+      >
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => onExpandedEventIndexesChange(new Set())}
+          disabled={expandedEventIndexes.size === 0}
+        >
+          Zwiń wszystkie
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          onClick={() =>
+            onExpandedEventIndexesChange(
+              new Set(result.events.map((event) => event.index)),
+            )
+          }
+          disabled={result.events.every((event) =>
+            expandedEventIndexes.has(event.index),
+          )}
+        >
+          Rozwiń wszystkie
+        </button>
+      </div>
       <div className="event-list">
-        {visibleEvents.map((event) => (
-          <article className="event-card" key={event.index}>
-            <div className="event-card__heading">
-              <div className="event-card__identity">
-                <span>WYDARZENIE {event.index}</span>
-                <h3>{formatTimestamp(event.startsAtUnixMs)}</h3>
-                <label className="event-name-field">
-                  <span>Nazwa folderu</span>
-                  <input
-                    value={eventNames[event.index] ?? ""}
-                    onChange={(change) =>
-                      onEventNameChange(event.index, change.target.value)
-                    }
-                  />
-                </label>
-              </div>
-              <div className="event-card__actions">
-                <strong>
-                  {event.items.length} pozycji ·{" "}
-                  {formatBytes(event.totalSizeBytes)}
-                </strong>
-                <button
-                  type="button"
-                  className="ghost"
-                  onClick={() => {
-                    const next = new Set(selectedKeys);
-                    for (const item of event.items) next.add(item.key);
-                    onSelectionChange(next);
-                  }}
-                >
-                  Zaznacz wydarzenie
-                </button>
-                <label className="event-import-toggle">
-                  <input
-                    type="checkbox"
-                    checked={event.items.some(
-                      (item) =>
-                        matches.get(item.key)?.state !== "imported" &&
-                        !excludedImportKeys.has(item.key),
-                    )}
-                    onChange={(change) =>
-                      setEventIncluded(event, change.target.checked)
-                    }
-                  />
-                  uwzględnij w imporcie
-                </label>
-              </div>
-            </div>
-            <div className="media-strip">
-              {event.items.map((item) => {
-                const importMatch = matches.get(item.key);
-                return (
-                  <div
-                    className={`media-tile ${selectedKeys.has(item.key) ? "media-tile--selected" : ""} ${excludedImportKeys.has(item.key) ? "media-tile--excluded" : ""} ${importMatch?.state === "imported" ? "media-tile--imported" : ""}`}
-                    key={item.key}
-                    role="button"
-                    tabIndex={0}
-                    onClick={() => setPreviewKey(item.key)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter" || event.key === " ") {
-                        setPreviewKey(item.key);
+        {visibleEvents.map((event) => {
+          const expanded = expandedEventIndexes.has(event.index);
+          const headingId = `event-${event.index}-heading`;
+          const contentId = `event-${event.index}-content`;
+          const eventName =
+            eventNames[event.index]?.trim() || `Wydarzenie ${event.index}`;
+          return (
+            <article
+              className={`event-card ${expanded ? "event-card--expanded" : "event-card--collapsed"}`}
+              key={event.index}
+            >
+              <div
+                className="event-card__heading"
+                id={headingId}
+                role="button"
+                tabIndex={0}
+                aria-expanded={expanded}
+                aria-controls={contentId}
+                aria-label={`${expanded ? "Zwiń" : "Rozwiń"} wydarzenie ${eventName}`}
+                onClick={(click) => {
+                  if (!headingContainsControl(click.target))
+                    toggleEvent(event.index);
+                }}
+                onKeyDown={(keyEvent) => {
+                  if (
+                    keyEvent.target === keyEvent.currentTarget &&
+                    (keyEvent.key === "Enter" || keyEvent.key === " ")
+                  ) {
+                    keyEvent.preventDefault();
+                    toggleEvent(event.index);
+                  }
+                }}
+              >
+                {!expanded && (
+                  <div className="event-card__thumbnail">
+                    <MediaThumbnail
+                      item={event.coverItem}
+                      maxDimension={160}
+                      rotation={
+                        metadataFor(event.coverItem.key).rotationDegrees
                       }
-                    }}
-                    title={item.files
-                      .map((file) => file.relativePath)
-                      .join("\n")}
-                  >
-                    <MediaThumbnail item={item} maxDimension={320} />
-                    <input
-                      aria-label="Zaznacz do korekty czasu"
-                      type="checkbox"
-                      checked={selectedKeys.has(item.key)}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={() => toggleItem(item.key)}
                     />
-                    <span className="media-tile__type">
-                      {item.files.find((file) => file.kind !== "xmp")?.kind ??
-                        "xmp"}
-                    </span>
+                  </div>
+                )}
+                <div className="event-card__identity">
+                  <span>WYDARZENIE {event.index}</span>
+                  {expanded ? (
+                    <>
+                      <h3>
+                        {formatEventRange(
+                          event.startsAtUnixMs,
+                          event.endsAtUnixMs,
+                        )}
+                      </h3>
+                      <label className="event-name-field">
+                        <span>Nazwa folderu</span>
+                        <input
+                          value={eventNames[event.index] ?? ""}
+                          onChange={(change) =>
+                            onEventNameChange(event.index, change.target.value)
+                          }
+                        />
+                      </label>
+                    </>
+                  ) : (
+                    <>
+                      <h3>{eventName}</h3>
+                      <p>
+                        {formatEventRange(
+                          event.startsAtUnixMs,
+                          event.endsAtUnixMs,
+                        )}
+                      </p>
+                    </>
+                  )}
+                </div>
+                {expanded && (
+                  <div className="event-card__actions">
                     <strong>
-                      {displayFileName(item.files[0]?.relativePath ?? item.key)}
+                      {event.items.length} pozycji ·{" "}
+                      {formatBytes(event.totalSizeBytes)}
                     </strong>
-                    <small>
-                      {item.hasRawJpegPair
-                        ? "RAW+JPEG"
-                        : `${item.files.length} plik`}
-                      {item.hasSidecar ? " + XMP" : ""}
-                    </small>
-                    <select
-                      aria-label="Profil aparatu dla pozycji"
-                      value={itemProfileAssignments[item.key] ?? "unknown"}
-                      onClick={(event) => event.stopPropagation()}
-                      onChange={(event) =>
-                        onItemProfileAssignment(item.key, event.target.value)
-                      }
-                    >
-                      <option value="unknown">Nieznany aparat</option>
-                      {cameraProfiles.map((profile) => (
-                        <option value={profile.id} key={profile.id}>
-                          {profile.name}
-                        </option>
-                      ))}
-                    </select>
-                    <small>
-                      {timeSourceLabel(item.timeSource)}
-                      {item.timeCorrectionSeconds !== 0
-                        ? ` · korekta ${item.timeCorrectionSeconds}s`
-                        : ""}
-                    </small>
-                    <small>
-                      {item.cameraMetadataConflict
-                        ? "sprzeczne dane aparatu"
-                        : item.cameraIdentity
-                          ? [
-                              item.cameraIdentity.make,
-                              item.cameraIdentity.model,
-                            ]
-                              .filter(Boolean)
-                              .join(" ")
-                          : "Nieznany aparat"}
-                    </small>
-                    {importMatch?.state !== "new" && (
-                      <span className="import-state">
-                        {importMatch?.state === "imported"
-                          ? "już importowane"
-                          : "częściowo importowane"}
-                      </span>
-                    )}
                     <button
                       type="button"
-                      className="plan-toggle"
-                      disabled={importMatch?.state === "imported"}
-                      onClick={(event) => {
-                        event.stopPropagation();
-                        toggleImportItem(item.key);
+                      className="ghost"
+                      onClick={() => {
+                        const next = new Set(selectedKeys);
+                        for (const item of event.items) next.add(item.key);
+                        onSelectionChange(next);
                       }}
                     >
-                      {importMatch?.state === "imported"
-                        ? "pominięte"
-                        : excludedImportKeys.has(item.key)
-                          ? "dodaj do planu"
-                          : "pomiń w planie"}
+                      Zaznacz wydarzenie
                     </button>
+                    <label className="event-import-toggle">
+                      <input
+                        type="checkbox"
+                        checked={event.items.some(
+                          (item) =>
+                            matches.get(item.key)?.state !== "imported" &&
+                            !excludedImportKeys.has(item.key),
+                        )}
+                        onChange={(change) =>
+                          setEventIncluded(event, change.target.checked)
+                        }
+                      />
+                      uwzględnij w imporcie
+                    </label>
                   </div>
-                );
-              })}
-            </div>
-          </article>
-        ))}
+                )}
+                <span className="event-card__chevron" aria-hidden="true">
+                  {expanded ? "⌃" : "⌄"}
+                </span>
+              </div>
+              {expanded && (
+                <div
+                  className="media-strip"
+                  id={contentId}
+                  aria-labelledby={headingId}
+                >
+                  {event.items.map((item) => {
+                    const importMatch = matches.get(item.key);
+                    const metadata = metadataFor(item.key);
+                    return (
+                      <div
+                        className={`media-tile ${selectedKeys.has(item.key) ? "media-tile--selected" : ""} ${excludedImportKeys.has(item.key) ? "media-tile--excluded" : ""} ${metadata.rejected ? "media-tile--rejected" : ""} ${importMatch?.state === "imported" ? "media-tile--imported" : ""}`}
+                        key={item.key}
+                        role="button"
+                        tabIndex={0}
+                        onClick={() => setPreviewKey(item.key)}
+                        onKeyDown={(event) => {
+                          if (event.key === "Enter" || event.key === " ") {
+                            setPreviewKey(item.key);
+                          }
+                        }}
+                        title={item.files
+                          .map((file) => file.relativePath)
+                          .join("\n")}
+                      >
+                        <MediaThumbnail
+                          item={item}
+                          maxDimension={320}
+                          rotation={metadata.rotationDegrees}
+                        />
+                        <input
+                          aria-label="Zaznacz do korekty czasu"
+                          type="checkbox"
+                          checked={selectedKeys.has(item.key)}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={() => toggleItem(item.key)}
+                        />
+                        <span className="media-tile__type">
+                          {item.files.find((file) => file.kind !== "xmp")
+                            ?.kind ?? "xmp"}
+                        </span>
+                        <strong>
+                          {displayFileName(
+                            item.files[0]?.relativePath ?? item.key,
+                          )}
+                        </strong>
+                        <div className="media-tile__metadata">
+                          <select
+                            aria-label="Ocena zdjęcia"
+                            value={metadata.rating}
+                            onClick={(event) => event.stopPropagation()}
+                            onChange={(event) =>
+                              updateMetadata(item.key, {
+                                rating: Number(event.target.value),
+                              })
+                            }
+                          >
+                            {[0, 1, 2, 3, 4, 5].map((rating) => (
+                              <option value={rating} key={rating}>
+                                {rating} ★
+                              </option>
+                            ))}
+                          </select>
+                          <button
+                            type="button"
+                            className="ghost"
+                            aria-pressed={metadata.rejected}
+                            onClick={(event) => {
+                              event.stopPropagation();
+                              updateMetadata(item.key, {
+                                rejected: !metadata.rejected,
+                              });
+                            }}
+                          >
+                            {metadata.rejected ? "Przywróć" : "Odrzuć"}
+                          </button>
+                        </div>
+                        <small>
+                          {item.hasRawJpegPair
+                            ? "RAW+JPEG"
+                            : `${item.files.length} plik`}
+                          {item.hasSidecar ? " + XMP" : ""}
+                        </small>
+                        <select
+                          aria-label="Profil aparatu dla pozycji"
+                          value={itemProfileAssignments[item.key] ?? "unknown"}
+                          onClick={(event) => event.stopPropagation()}
+                          onChange={(event) =>
+                            onItemProfileAssignment(
+                              item.key,
+                              event.target.value,
+                            )
+                          }
+                        >
+                          <option value="unknown">Nieznany aparat</option>
+                          {cameraProfiles.map((profile) => (
+                            <option value={profile.id} key={profile.id}>
+                              {profile.name}
+                            </option>
+                          ))}
+                        </select>
+                        <small>
+                          {timeSourceLabel(item.timeSource)}
+                          {item.timeCorrectionSeconds !== 0
+                            ? ` · korekta ${item.timeCorrectionSeconds}s`
+                            : ""}
+                        </small>
+                        <small>
+                          {item.cameraMetadataConflict
+                            ? "sprzeczne dane aparatu"
+                            : item.cameraIdentity
+                              ? [
+                                  item.cameraIdentity.make,
+                                  item.cameraIdentity.model,
+                                ]
+                                  .filter(Boolean)
+                                  .join(" ")
+                              : "Nieznany aparat"}
+                        </small>
+                        {importMatch?.state !== "new" && (
+                          <span className="import-state">
+                            {importMatch?.state === "imported"
+                              ? "już importowane"
+                              : "częściowo importowane"}
+                          </span>
+                        )}
+                        <button
+                          type="button"
+                          className="plan-toggle"
+                          disabled={importMatch?.state === "imported"}
+                          onClick={(event) => {
+                            event.stopPropagation();
+                            toggleImportItem(item.key);
+                          }}
+                        >
+                          {importMatch?.state === "imported"
+                            ? "pominięte"
+                            : excludedImportKeys.has(item.key)
+                              ? "dodaj do planu"
+                              : "pomiń w planie"}
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </article>
+          );
+        })}
       </div>
       {previewIndex >= 0 && (
         <FullMediaPreview
           item={visibleItems[previewIndex]}
+          metadata={metadataFor(visibleItems[previewIndex].key)}
+          onMetadataChange={(patch) =>
+            updateMetadata(visibleItems[previewIndex].key, patch)
+          }
           position={previewIndex + 1}
           total={visibleItems.length}
           onClose={() => setPreviewKey(null)}
@@ -1518,18 +2051,32 @@ function ScanResults({
               żadnych plików.
             </p>
           </div>
-          <button
-            type="button"
-            className={importPlan ? "secondary" : "primary-action"}
-            onClick={onPrepareImportPlan}
-            disabled={planning || busy}
-          >
-            {planning
-              ? "Przygotowywanie…"
-              : importPlan
-                ? "Odśwież plan"
-                : "Przygotuj plan"}
-          </button>
+          <div className="import-planner__actions">
+            {importPlan &&
+              (!importSession ||
+                ["completed", "cancelled"].includes(importSession.status)) && (
+                <button
+                  type="button"
+                  className="danger-quiet"
+                  onClick={onDeleteImportPlan}
+                  disabled={planning || busy || importActionPending}
+                >
+                  Usuń plan
+                </button>
+              )}
+            <button
+              type="button"
+              className={importPlan ? "secondary" : "primary-action"}
+              onClick={onPrepareImportPlan}
+              disabled={planning || busy}
+            >
+              {planning
+                ? "Przygotowywanie…"
+                : importPlan
+                  ? "Odśwież plan"
+                  : "Przygotuj plan"}
+            </button>
+          </div>
         </div>
         {importPlan && (
           <ImportPlanPreview
@@ -1624,6 +2171,33 @@ function ScanProgressPanel({
   );
 }
 
+function StreamingScanPreview({ items }: { items: MediaItem[] }) {
+  return (
+    <section
+      className="streaming-scan-preview"
+      aria-label="Zdjęcia znalezione podczas skanowania"
+    >
+      <div className="streaming-scan-preview__heading">
+        <div>
+          <span className="section-label">PODGLĄD NA ŻYWO</span>
+          <h3>Znalezione zdjęcia</h3>
+        </div>
+        <strong>{items.length}</strong>
+      </div>
+      <div className="streaming-scan-preview__strip">
+        {items.map((item) => (
+          <div className="streaming-scan-preview__item" key={item.key}>
+            <MediaThumbnail item={item} maxDimension={320} />
+            <small>
+              {displayFileName(item.files[0]?.relativePath ?? item.key)}
+            </small>
+          </div>
+        ))}
+      </div>
+    </section>
+  );
+}
+
 function MediaThumbnail({
   item,
   maxDimension,
@@ -1639,9 +2213,9 @@ function MediaThumbnail({
 }) {
   const container = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(eager);
+  const source = previewSource(item);
   const [url, setUrl] = useState<string | null>(null);
   const [failed, setFailed] = useState(false);
-  const source = previewSource(item);
 
   useEffect(() => {
     if (
@@ -1676,6 +2250,7 @@ function MediaThumbnail({
     }
     const controller = new AbortController();
     setFailed(false);
+    setUrl(null);
     void requestThumbnail(source.path, maxDimension, {
       priority: eager ? "preview" : "visible",
       signal: controller.signal,
@@ -1715,6 +2290,8 @@ function MediaThumbnail({
 
 function FullMediaPreview({
   item,
+  metadata,
+  onMetadataChange,
   position,
   total,
   onClose,
@@ -1722,18 +2299,28 @@ function FullMediaPreview({
   onNext,
 }: {
   item: MediaItem;
+  metadata: PhotoUserMetadataUpdate;
+  onMetadataChange: (
+    patch: Partial<Omit<PhotoUserMetadataUpdate, "itemKey">>,
+  ) => void;
   position: number;
   total: number;
   onClose: () => void;
   onPrevious: () => void;
   onNext: () => void;
 }) {
-  const [rotation, setRotation] = useState(0);
   const [scale, setScale] = useState(1);
+  const jpeg = item.files.find((file) => file.kind === "jpeg");
   useEffect(() => {
-    setRotation(0);
     setScale(1);
   }, [item.key]);
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") onClose();
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [onClose]);
   return (
     <div
       className="preview-overlay"
@@ -1747,6 +2334,27 @@ function FullMediaPreview({
             {position} / {total}
           </strong>
           <div>
+            <select
+              aria-label="Ocena zdjęcia w podglądzie"
+              value={metadata.rating}
+              onChange={(event) =>
+                onMetadataChange({ rating: Number(event.target.value) })
+              }
+            >
+              {[0, 1, 2, 3, 4, 5].map((rating) => (
+                <option value={rating} key={rating}>
+                  {rating} ★
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="ghost"
+              aria-pressed={metadata.rejected}
+              onClick={() => onMetadataChange({ rejected: !metadata.rejected })}
+            >
+              {metadata.rejected ? "Przywróć" : "Odrzuć"}
+            </button>
             <button
               type="button"
               className="ghost"
@@ -1760,22 +2368,37 @@ function FullMediaPreview({
             <button
               type="button"
               className="ghost"
-              onClick={() => setRotation((value) => (value + 90) % 360)}
+              onClick={() =>
+                onMetadataChange({
+                  rotationDegrees: ((metadata.rotationDegrees + 90) % 360) as
+                    0 | 90 | 180 | 270,
+                })
+              }
             >
-              Obróć widok
+              Obróć o 90°
             </button>
             <button type="button" className="ghost" onClick={onClose}>
               Zamknij
             </button>
           </div>
         </div>
-        <MediaThumbnail
-          item={item}
-          maxDimension={1_600}
-          eager
-          rotation={rotation}
-          scale={scale}
-        />
+        {jpeg ? (
+          <OriginalJpegPreview
+            key={item.key}
+            path={jpeg.path}
+            rotation={metadata.rotationDegrees}
+            scale={scale}
+          />
+        ) : (
+          <MediaThumbnail
+            key={item.key}
+            item={item}
+            maxDimension={1_600}
+            eager
+            rotation={metadata.rotationDegrees}
+            scale={scale}
+          />
+        )}
         <div className="preview-details">
           <h3>{displayFileName(item.files[0]?.relativePath ?? item.key)}</h3>
           <p>
@@ -1809,6 +2432,54 @@ function FullMediaPreview({
           </button>
         </div>
       </div>
+    </div>
+  );
+}
+
+function OriginalJpegPreview({
+  path,
+  rotation,
+  scale,
+}: {
+  path: string;
+  rotation: number;
+  scale: number;
+}) {
+  const [url, setUrl] = useState<string | null>(null);
+  const [failed, setFailed] = useState(false);
+
+  useEffect(() => {
+    let active = true;
+    setUrl(null);
+    setFailed(false);
+    void allowOriginalJpegPreview(path)
+      .then((allowedPath) => {
+        if (active) setUrl(convertFileSrc(allowedPath));
+      })
+      .catch(() => {
+        if (active) setFailed(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [path]);
+
+  return (
+    <div className="media-thumbnail media-thumbnail--original">
+      {url ? (
+        <img
+          src={url}
+          alt=""
+          draggable={false}
+          onError={() => {
+            setUrl(null);
+            setFailed(true);
+          }}
+          style={{ transform: `rotate(${rotation}deg) scale(${scale})` }}
+        />
+      ) : (
+        <span>{failed ? "brak podglądu" : "ładowanie oryginału…"}</span>
+      )}
     </div>
   );
 }
@@ -2282,6 +2953,29 @@ function formatTimestamp(timestamp: number): string {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(timestamp));
+}
+
+function formatEventRange(startsAt: number, endsAt: number): string {
+  if (startsAt === 0 || endsAt === 0) return "Czas nieznany";
+  if (startsAt === endsAt) return formatTimestamp(startsAt);
+
+  const start = new Date(startsAt);
+  const end = new Date(endsAt);
+  const sameDay =
+    start.getFullYear() === end.getFullYear() &&
+    start.getMonth() === end.getMonth() &&
+    start.getDate() === end.getDate();
+  if (!sameDay) {
+    return `${formatTimestamp(startsAt)} – ${formatTimestamp(endsAt)}`;
+  }
+
+  const date = new Intl.DateTimeFormat("pl-PL", {
+    dateStyle: "medium",
+  }).format(start);
+  const time = new Intl.DateTimeFormat("pl-PL", {
+    timeStyle: "short",
+  });
+  return `${date}, ${time.format(start)}–${time.format(end)}`;
 }
 
 function defaultEventNames(events: SourceScanResponse["events"]) {

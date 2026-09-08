@@ -1,17 +1,19 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   cancelBackupJob,
+  cancelBackupPlanningJob,
   getBackupJob,
   listBackupJobs,
+  listBackupPlanningJobs,
   listBackupTargets,
   normalizeBackupError,
   pauseBackupJob,
-  prepareBackupPlan,
   recognizeBackupTarget,
   registerBackupTarget,
   removeBackupTarget,
   resumeBackupJob,
   startBackupJob,
+  startBackupPlanningJob,
 } from "./backups";
 
 const { invoke } = vi.hoisted(() => ({ invoke: vi.fn() }));
@@ -41,7 +43,7 @@ describe("backup commands", () => {
     });
   });
 
-  it("exposes configuration removal and plan preparation", async () => {
+  it("exposes configuration removal and planning jobs", async () => {
     invoke.mockResolvedValue(undefined);
 
     await removeBackupTarget("target-id");
@@ -49,27 +51,40 @@ describe("backup commands", () => {
       targetId: "target-id",
     });
 
-    await prepareBackupPlan("target-id", "E:\\", "C:\\Photos");
-    expect(invoke).toHaveBeenLastCalledWith("prepare_backup_plan", {
+    await startBackupPlanningJob("target-id", "E:\\", "C:\\Photos");
+    expect(invoke).toHaveBeenLastCalledWith("start_backup_planning_job", {
       targetId: "target-id",
       targetPath: "E:\\",
       sourcePath: "C:\\Photos",
+    });
+    await listBackupPlanningJobs();
+    expect(invoke).toHaveBeenLastCalledWith("list_backup_planning_jobs");
+    await cancelBackupPlanningJob("planning-id");
+    expect(invoke).toHaveBeenLastCalledWith("cancel_backup_planning_job", {
+      jobId: "planning-id",
     });
   });
 
   it("normalizes structured and unknown errors", () => {
     expect(
       normalizeBackupError({ code: "wrong", message: "Zły dysk" }),
-    ).toEqual({ code: "wrong", message: "Zły dysk" });
+    ).toEqual({
+      code: "wrong",
+      message: "The backup operation could not be completed.",
+      technicalDetails: "Zły dysk",
+    });
     expect(normalizeBackupError("Awaria")).toEqual({
       code: "unknown",
-      message: "Awaria",
+      message: "The backup operation could not be completed.",
+      technicalDetails: "Awaria",
     });
-    expect(normalizeBackupError(null).message).toContain("nieznany błąd");
+    expect(normalizeBackupError(null).message).toContain(
+      "could not be completed",
+    );
     expect(
       normalizeBackupError({ code: "backupIoFailed", message: "os error 112" })
         .message,
-    ).toContain("dysk jest podłączony");
+    ).toContain("drive is connected");
   });
 
   it("starts, restores and controls background backup jobs", async () => {

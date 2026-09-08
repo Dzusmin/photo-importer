@@ -1,48 +1,49 @@
 # Photo Importer
 
-Wieloplatformowa aplikacja do bezpiecznego importowania zdjęć, grupowania ich w
-wydarzenia i wykonywania zweryfikowanych kopii zapasowych.
+A cross-platform application for safely importing photos, grouping them into
+events, and creating verified backups.
 
-Projekt ma działający szkielet oraz kompletny pion ustawień: model domenowy,
-walidację, zapis atomowy, kopię bezpieczeństwa, komendy Tauri i ekran React.
+The project has a working application foundation and a complete settings
+vertical: the domain model, validation, atomic persistence, recovery backup,
+Tauri commands, and a React screen.
 
-## Stan bazowy
+## Baseline status
 
-Stan funkcjonalny na 2 września 2026 r. obejmuje:
+As of September 2, 2026, the functional baseline includes:
 
-- aplikację desktopową Tauri z interfejsem React do konfiguracji, wykrywania i
-  skanowania źródeł, grupowania materiału w wydarzenia oraz podglądu miniatur,
-- deterministyczne planowanie i wznawialne wykonywanie importu z kontrolą
-  kolizji, sumami SHA-256 i trwałym manifestem SQLite,
-- monitorowanie kart pamięci, pracę w zasobniku, autostart i powiadomienia,
-- lokalne, wersjonowane i weryfikowane kopie zapasowe biblioteki,
-- testy jednostkowe i integracyjne frontendu oraz wszystkich crates Rust,
-  uruchamiane również przez usługę `ci` w Docker Compose.
+- a Tauri desktop application with a React interface for configuration, source
+  detection and scanning, grouping media into events, and thumbnail previews,
+- deterministic planning and resumable import execution with collision
+  handling, SHA-256 checksums, and a persistent SQLite manifest,
+- memory-card monitoring, system tray operation, autostart, and notifications,
+- local, versioned, and verified library backups,
+- frontend unit and integration tests and tests for every Rust crate, also run
+  by the `ci` service in Docker Compose.
 
-Aktualne ograniczenia: HEIC i filmy mają placeholder zamiast generowanej
-miniatury, Docker weryfikuje aplikację w Linuksie, ale nie tworzy natywnych
-instalatorów, a obsługa NAS i udziałów sieciowych nie jest jeszcze
-zaimplementowana. Dane uruchomieniowe (ustawienia, manifest i cache miniatur)
-powstają w systemowych katalogach aplikacji, nie w repozytorium.
+Current limitations: HEIC files and videos use a placeholder instead of a
+generated thumbnail; Docker verifies the application on Linux but does not
+create native installers; and NAS and network-share support has not yet been
+implemented. Runtime data (settings, manifest, and thumbnail cache) is created
+in the operating system's application directories, not in the repository.
 
-## Wymagania na Windows
+## Windows requirements
 
 - Node.js 24
-- Rust 1.98 przez `rustup`
-- Visual Studio z workloadem **Desktop development with C++**
-- WebView2 Runtime (standardowo obecny w Windows 10/11)
+- Rust 1.98 through `rustup`
+- Visual Studio with the **Desktop development with C++** workload
+- WebView2 Runtime (normally included with Windows 10/11)
 
-Po pierwszej instalacji Rusta należy otworzyć nowy terminal, aby Cargo znalazło
-się w `PATH`.
+After installing Rust for the first time, open a new terminal so that Cargo is
+available in `PATH`.
 
-## Uruchomienie
+## Running the application
 
 ```powershell
 npm ci
 npm run desktop:dev
 ```
 
-## Kontrole jakości
+## Quality checks
 
 ```powershell
 npm run check
@@ -53,142 +54,149 @@ cargo test --workspace
 cargo bench -p importer-thumbnails --bench thumbnail_pipeline
 ```
 
-Opis pomiarów i wynik referencyjny znajduje się w
+The benchmark methodology and reference result are documented in
 [`docs/thumbnail-performance.md`](docs/thumbnail-performance.md).
 
-Testy frontendu używają Vitest, Testing Library i mockowanego IPC Tauri. Raport
-HTML trafia do `coverage/`; progi pokrycia są egzekwowane przez `npm run check`
-i workflow CI. Rustowe testy obejmują osobne crates oraz pełny przepływ
-`skan → grupowanie → plan → import → ponowne rozpoznanie w manifeście`.
+Frontend tests use Vitest, Testing Library, and mocked Tauri IPC. The HTML
+report is written to `coverage/`; coverage thresholds are enforced by
+`npm run check` and the CI workflow. Rust tests cover the individual crates and
+the complete `scan → group → plan → import → manifest rediscovery` flow.
 
 ## Docker
 
-Kontener uruchamia testy frontendu i Rust w środowisku Linux:
+The container runs frontend and Rust tests in a Linux environment:
 
 ```powershell
 docker compose run --build --rm ci
 ```
 
-Polecenie korzysta z plików blokad `package-lock.json`, `Cargo.lock` i
-przypiętego toolchaina Rust 1.98, dzięki czemu stan bazowy jest odtwarzalny.
+The command uses the `package-lock.json` and `Cargo.lock` lockfiles and the
+pinned Rust 1.98 toolchain, making the baseline reproducible.
 
-Docker nie buduje instalatorów dla wszystkich platform. Artefakty Windows,
-macOS i Linux muszą być budowane przez natywne runnery odpowiednich systemów.
-Workflow w `.github/workflows/ci.yml` wykonuje kontrole Rust na trzech systemach.
+Docker does not build installers for every platform. Windows, macOS, and Linux
+artifacts must be built by native runners for the respective operating systems.
+The workflow in `.github/workflows/ci.yml` runs Rust checks on all three.
 
-## Architektura
+## Architecture
 
-- `src/` — interfejs React/TypeScript
-- `src-tauri/` — cienka integracja aplikacji z systemem operacyjnym
-- `crates/importer-domain/` — reguły biznesowe niezależne od Tauri i systemu
-- `crates/importer-background/` — stan i decyzje monitora nośników niezależne od Tauri
-- `crates/importer-backup/` — rejestr dysków i wersjonowane, weryfikowane kopie lokalne
-- `crates/importer-import/` — transakcyjne kopiowanie, weryfikacja i wznawianie sesji
-- `crates/importer-manifest/` — historia importów i rozpoznawanie zawartości
-- `crates/importer-media/` — wykrywanie nośników, skan plików i grupowanie wydarzeń
-- `crates/importer-plan/` — bezpieczne, deterministyczne planowanie ścieżek importu
-- `crates/importer-settings/` — wersjonowany odczyt i atomowy zapis ustawień JSON
-- `crates/importer-thumbnails/` — wersjonowany, usuwalny cache podglądów JPEG
+- `src/` — the React/TypeScript interface
+- `src-tauri/` — a thin integration layer between the application and the OS
+- `crates/importer-domain/` — business rules independent of Tauri and the OS
+- `crates/importer-background/` — media-monitor state and decisions independent of Tauri
+- `crates/importer-backup/` — drive registry and versioned, verified local backups
+- `crates/importer-import/` — transactional copying, verification, and session resumption
+- `crates/importer-manifest/` — import history and content recognition
+- `crates/importer-media/` — media detection, file scanning, and event grouping
+- `crates/importer-plan/` — safe, deterministic planning of import paths
+- `crates/importer-settings/` — versioned loading and atomic saving of JSON settings
+- `crates/importer-thumbnails/` — a versioned, disposable JPEG preview cache
 
-Repozytorium ustawień otrzymuje katalog konfiguracji od warstwy aplikacji. Przy
-drugim i każdym kolejnym zapisie poprzedni poprawny `settings.json` trafia do
-`settings.json.bak`. Uszkodzony plik główny nie jest automatycznie nadpisywany,
-a odzyskanie danych z kopii wymaga jawnego wywołania operacji przywracania.
+The settings repository receives its configuration directory from the
+application layer. On the second and every subsequent save, the previous valid
+`settings.json` is moved to `settings.json.bak`. A corrupt primary file is not
+overwritten automatically; recovering data from the backup requires an
+explicit restore operation.
 
-Ekran ustawień pozwala skonfigurować bibliotekę, zachowanie importu, podział na
-wydarzenia, nazwy folderów, profile aparatów, korekty czasu oraz preferencje
-lokalne. Eksportowany JSON zawiera tylko część przenośną — pomija lokalne ścieżki,
-autostart, minimalizację i identyfikatory nośników. Import jest walidowany i
-zapisywany tym samym bezpiecznym mechanizmem co zwykła edycja.
+The settings screen configures the library, import behavior, event splitting,
+folder names, camera profiles, time adjustments, and local preferences. The
+exported JSON contains only portable settings—it omits local paths, autostart,
+minimization, and media identifiers. Imported settings are validated and saved
+using the same safe mechanism as regular edits.
 
-Ekran startowy odświeża listę nośników co 5 sekund, wykrywa karty wymienne oraz
-woluminy zawierające `DCIM` i pozwala skanować ręcznie wskazane katalogi. Skaner
-rozpoznaje popularne JPEG, HEIC, formaty RAW, filmy i XMP. Pliki RAW+JPEG oraz ich
-sidecar są składane w jedną pozycję, a pozycje trafiają do wydarzeń według
-przerwy skonfigurowanej przez użytkownika. Czas wykonania jest odczytywany z EXIF
-lub metadanych filmu, z kontrolowanym fallbackiem do czasu modyfikacji pliku.
-Wynik skanu pozwala skorygować czas jednej lub wielu pozycji i natychmiast
-ponownie grupuje wydarzenia.
+The home screen refreshes the media list every five seconds, detects removable
+cards and volumes containing `DCIM`, and allows users to scan directories they
+select manually. The scanner recognizes common JPEG, HEIC, RAW, video, and XMP
+files. RAW+JPEG files and their sidecars are combined into a single item, and
+items are assigned to events according to the user-configured time gap. Capture
+time is read from EXIF or video metadata, with a controlled fallback to the
+file modification time. Scan results allow the user to adjust the time of one
+or more items and immediately regroup the events.
 
-`crates/importer-manifest/` przechowuje wersjonowaną bazę SQLite plików już
-zaimportowanych. Porównanie zaczyna się od rozmiaru, a dla potencjalnych trafień
-wykorzystuje SHA-256 zawartości. Dzięki temu zmiana nazwy pliku lub użycie innej
-karty nie powoduje ponownego importu tego samego materiału.
-Odczyt EXIF jest wykonywany przez ograniczoną pulę 2–4 pracowników, z osobnym
-parserem dla każdego pracownika. Wyniki zachowują kolejność odkrycia. Pełne
-haszowanie na jednym nośniku pozostaje sekwencyjne i korzysta ze wskazówki
-sekwencyjnego odczytu na Windows. Po zweryfikowaniu pliku manifest zapisuje cache
-powiązany z tożsamością nośnika, ścieżką, rozmiarem, czasem modyfikacji oraz
-SHA-256 pierwszych i ostatnich 128 KiB. Ponowny skan niezmienionego źródła nie
-musi dzięki temu ponownie czytać całej zawartości pliku.
+`crates/importer-manifest/` stores a versioned SQLite database of files that
+have already been imported. Comparisons begin with file size and use the
+content's SHA-256 hash for possible matches. Renaming a file or using another
+card therefore does not cause the same media to be imported again.
+EXIF is read by a bounded pool of 2–4 workers, each with its own parser. Results
+preserve discovery order. Full hashing on a single medium remains sequential
+and uses the sequential-read hint on Windows. After a file is verified, the
+manifest stores a cache entry tied to the media identity, path, size,
+modification time, and SHA-256 hashes of the first and last 128 KiB. As a
+result, rescanning an unchanged source does not require reading the entire file
+again.
 
-Po skanowaniu można nadać nazwy wydarzeniom, wykluczyć całe wydarzenia lub
-pojedyncze pozycje i przygotować plan importu bez zapisywania czegokolwiek w
-bibliotece. Planner rozwija szablon folderów, neutralizuje nazwy niedozwolone na
-Windows/macOS/Linux, blokuje ścieżki absolutne i `..`, pomija pliki rozpoznane w
-manifeście oraz pokazuje dokładną ścieżkę każdego pliku. Kolizje zatrzymują plan
-albo dostają wspólny kolejny numer dla całej pary RAW+JPEG+XMP — zgodnie z
-ustawieniem użytkownika.
+After scanning, users can name events, exclude complete events or individual
+items, and prepare an import plan without writing anything to the library. The
+planner expands the folder template, sanitizes names that are invalid on
+Windows/macOS/Linux, rejects absolute paths and `..`, skips files recognized in
+the manifest, and shows the exact path for every file. Collisions either stop
+planning or receive one shared next sequence number for the entire
+RAW+JPEG+XMP group, according to the user's setting.
 
-Gotowy plan można zapisać jako trwałą sesję importu i uruchomić. Każdy plik jest
-kopiowany do należącego do sesji pliku `.partial`, synchronizowany, porównywany
-z oryginałem przez SHA-256 i publikowany bez nadpisywania istniejącej ścieżki.
-Manifest jest aktualizowany dopiero po udanej weryfikacji. Postęp, błędy oraz
-żądania pauzy i anulowania są przechowywane w SQLite, dzięki czemu przerwany
-import można wznowić po ponownym uruchomieniu aplikacji. Tryb przenoszenia usuwa
-źródła dopiero po zweryfikowaniu wszystkich zaplanowanych kopii i wymaga
-dodatkowego potwierdzenia.
+A completed plan can be saved as a persistent import session and started. Each
+file is copied to a session-owned `.partial` file, synchronized, compared with
+the original by SHA-256, and published without overwriting an existing path.
+The manifest is updated only after successful verification. Progress, errors,
+and pause and cancellation requests are stored in SQLite, so an interrupted
+import can be resumed after restarting the application. Move mode deletes
+source files only after all planned copies have been verified and requires an
+additional confirmation.
 
-Skanowanie działa jako zadanie raportujące kolejne fazy. Podczas odkrywania
-plików interfejs pokazuje animowany pasek, a po ustaleniu liczby obsługiwanych
-plików przechodzi na dokładny postęp procentowy. Zadanie można anulować, a drugi
-skan tego samego źródła nie jest uruchamiany równolegle.
-Etap porównywania z historią pokazuje dodatkowo liczbę bajtów odczytanych z
-nośnika, trafienia cache i liczbę pełnych odczytów. Wynik skanu zawiera czasy
-odkrywania plików i odczytu metadanych, co umożliwia porównywanie wydajności na
-rzeczywistych kartach.
+Scanning runs as a job that reports successive phases. During file discovery,
+the interface shows an animated progress bar; once the number of supported
+files is known, it switches to exact percentage progress. The job can be
+cancelled, and a second scan of the same source is not run concurrently.
+The history-comparison stage also reports the number of bytes read from the
+medium, cache hits, and full reads. Scan results include file-discovery and
+metadata-reading durations, making it possible to compare performance on real
+cards.
 
-Miniatury są generowane na żądanie tylko dla elementów zbliżających się do
-widocznego obszaru. Trafiają jako JPEG do systemowego katalogu cache aplikacji,
-w `thumbnails/v2`, obok lokalnego `index.sqlite3`. Cache ma limit 5 GB i usuwa
-najdawniej używane wpisy. Kolejka deduplikuje identyczne żądania, wykonuje do
-czterech prac równolegle i daje pierwszeństwo pełnemu podglądowi. JPEG jest
-dekodowany ze wstępnym skalowaniem, a dla RAW aplikacja najpierw pobiera osadzoną
-miniaturę lub podgląd przez `rawler`, bez dekodowania matrycy. Pliki cache są
-udostępniane WebView bez kosztownej serializacji bajtów do JSON. Nieobsługiwane
-HEIC i filmy otrzymują placeholder bez wpływu na skanowanie lub import. Cache
-można bezpiecznie wyczyścić na ekranie ustawień.
+Thumbnails are generated on demand only for items approaching the visible
+area, including previews of results arriving during a scan. They are stored as
+JPEG files in the application's system cache directory under `thumbnails/v3`,
+alongside a local `index.sqlite3`. The cache has a 5 GB limit and evicts the
+least recently used entries. The queue deduplicates identical requests, runs
+up to four jobs concurrently, and prioritizes the full preview. JPEG files use
+the embedded EXIF thumbnail first and otherwise are decoded with downscaling.
+For RAW files, the application first obtains an embedded thumbnail or preview
+through `rawler`, without decoding the sensor data. Cache files are exposed to
+the WebView without the expensive serialization of bytes to JSON. Unsupported
+HEIC files and videos receive a placeholder without affecting scanning or
+importing. The cache can be safely cleared from the settings screen. Clicking a
+JPEG opens the original file directly as a full preview; for RAW files, a
+1600 px preview is generated from the image embedded in the container.
 
-Monitor nośników działa w osobnym zadaniu także wtedy, gdy główne okno jest
-ukryte. Co pięć sekund porównuje migawkę woluminów, reaguje tylko na faktyczne
-podłączenie znanej karty i ponownie pozwala na reakcję dopiero po jej odłączeniu.
-Zachowanie `zapytaj`, `skanuj automatycznie` lub `ignoruj` pochodzi z profilu
-aparatu przypisanego do odcisku nośnika. Automatyczny skan korzysta z tej samej
-kolejki, deduplikacji i paska postępu co skan ręczny. Panel na ekranie startowym
-pokazuje stan automatu, liczbę kart, aktywne skany i ostatnie zdarzenie.
+The media monitor runs in a separate job even when the main window is hidden.
+Every five seconds it compares volume snapshots, responds only when a known
+card is actually connected, and permits another response only after it has
+been disconnected. The `ask`, `scan automatically`, or `ignore` behavior comes
+from the camera profile assigned to the media fingerprint. An automatic scan
+uses the same queue, deduplication, and progress bar as a manual scan. A panel
+on the home screen shows the automation status, card count, active scans, and
+latest event.
 
-Aplikacja ma ikonę zasobnika z akcjami pokazania okna, natychmiastowej kontroli
-nośników i zakończenia programu. Zamknięcie okna ukrywa je, gdy włączono opcję
-minimalizacji do zasobnika; przy wyłączonej opcji kończy aplikację. Trwająca
-sesja importu blokuje przypadkowe zamknięcie, aby kopiowanie nie zostało przerwane
-w połowie pliku. Ustawienie autostartu jest synchronizowane z systemem, a start
-przy logowaniu używa argumentu `--background`, dzięki czemu przy włączonej
-minimalizacji okno pozostaje ukryte. Powiadomienia systemowe informują o znanej
-karcie oczekującej na decyzję oraz o wyniku automatycznego skanu. Na Windows
-pełna identyfikacja i ikona powiadomień są dostępne w zainstalowanym buildzie;
-w trybie developerskim system może pokazać nazwę PowerShell.
+The application has a system tray icon with actions to show the window, check
+media immediately, and quit. Closing the window hides it when minimize to tray
+is enabled; when disabled, it exits the application. An active import session
+prevents accidental closure so that copying is not interrupted halfway through
+a file. The autostart setting is synchronized with the operating system, and
+startup at login uses the `--background` argument so the window stays hidden
+when minimization is enabled. System notifications report a known card waiting
+for a decision and the result of an automatic scan. On Windows, full
+identification and the notification icon are available in an installed build;
+in development mode, the system may display the name PowerShell.
 
-Silnik kopii zapasowych rejestruje dyski pod trwałym UUID zapisanym zarówno w
-lokalnym rejestrze, jak i na nośniku. Chroni to przed zapisaniem kopii na innym
-dysku, który przypadkiem dostał tę samą literę. Biblioteka jest odwzorowana w
-czytelnym `Photo Backup/Photos`, a manifest SQLite, znacznik dysku i starsze
-wersje znajdują się w `Photo Backup/.photo-importer`. Plan porównuje SHA-256
-źródła, manifestu i bieżącej kopii, więc pomija niezmienione pliki oraz wykrywa
-uszkodzenie kopii. Nowa zawartość jest zapisywana do pliku tymczasowego,
-synchronizowana i weryfikowana przed publikacją; zastępowana wersja trafia do
-ukrytego archiwum i nie jest kasowana.
+The backup engine registers drives under a persistent UUID stored both in the
+local registry and on the medium. This prevents a backup from being written to
+a different drive that happens to receive the same drive letter. The library
+is mirrored in the readable `Photo Backup/Photos` directory, while the SQLite
+manifest, drive marker, and older versions are kept in
+`Photo Backup/.photo-importer`. The plan compares the SHA-256 hashes of the
+source, manifest, and current backup, so it skips unchanged files and detects
+backup corruption. New content is written to a temporary file, synchronized,
+and verified before publication; the replaced version is moved to a hidden
+archive and is not deleted.
 
-Kolejnym etapem będą adaptery NAS i udziałów sieciowych.
+NAS and network-share adapters are planned for the next stage.
 
-Kolejne komponenty silnika będą dodawane jako niezależne crates, aby można było
-je testować również bez uruchamiania interfejsu desktopowego.
+Further engine components will be added as independent crates so they can also
+be tested without launching the desktop interface.

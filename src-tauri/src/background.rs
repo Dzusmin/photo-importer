@@ -16,6 +16,10 @@ use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
 use crate::imports::{ImportService, session_source_matches};
+use crate::localization::{
+    NativeText as Nt, app_language, app_text, card_ready, imported_file_count, plan_file_count,
+    scan_result, text,
+};
 use crate::scan_jobs::{MediaScanJobStatus, ScanService, start_media_scan_internal};
 use crate::settings::SettingsService;
 use crate::sources::{PendingSourceWorkflow, SourceWorkflowState, persist_workflow};
@@ -33,6 +37,12 @@ pub(crate) struct NotificationRoute {
 
 #[derive(Debug, Default)]
 pub(crate) struct NotificationRouteState(Mutex<Option<NotificationRoute>>);
+
+pub(crate) struct TrayTextState {
+    show: MenuItem<tauri::Wry>,
+    refresh: MenuItem<tauri::Wry>,
+    quit: MenuItem<tauri::Wry>,
+}
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -168,13 +178,16 @@ impl BackgroundService {
 pub(crate) struct BackgroundCommandError {
     code: &'static str,
     message: String,
+    technical_details: String,
 }
 
 impl BackgroundCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }
@@ -266,12 +279,36 @@ pub(crate) fn sync_autostart(app: &tauri::AppHandle, desired: bool) {
 }
 
 pub(crate) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
-    let show = MenuItem::with_id(app, "show", "Pokaż Photo Importer", true, None::<&str>)?;
-    let refresh = MenuItem::with_id(app, "refresh", "Sprawdź nośniki teraz", true, None::<&str>)?;
-    let quit = MenuItem::with_id(app, "quit", "Zakończ", true, None::<&str>)?;
+    let language = app
+        .state::<SettingsService>()
+        .current_settings()
+        .map_or(importer_domain::settings::UiLanguage::En, |settings| {
+            settings.local.ui_language
+        });
+    let show = MenuItem::with_id(
+        app,
+        "show",
+        text(language, Nt::TrayShow),
+        true,
+        None::<&str>,
+    )?;
+    let refresh = MenuItem::with_id(
+        app,
+        "refresh",
+        text(language, Nt::TrayRefresh),
+        true,
+        None::<&str>,
+    )?;
+    let quit = MenuItem::with_id(
+        app,
+        "quit",
+        text(language, Nt::TrayQuit),
+        true,
+        None::<&str>,
+    )?;
     let menu = Menu::with_items(app, &[&show, &refresh, &quit])?;
     let mut builder = TrayIconBuilder::with_id("main-tray")
-        .tooltip("Photo Importer — monitor nośników działa")
+        .tooltip(text(language, Nt::TrayTooltip))
         .menu(&menu)
         .show_menu_on_left_click(false)
         .on_menu_event(|app, event| match event.id().as_ref() {
@@ -296,7 +333,23 @@ pub(crate) fn setup_tray(app: &mut tauri::App) -> tauri::Result<()> {
         builder = builder.icon(icon.clone());
     }
     builder.build(app)?;
+    app.manage(TrayTextState {
+        show,
+        refresh,
+        quit,
+    });
     Ok(())
+}
+
+pub(crate) fn refresh_tray_text(app: &tauri::AppHandle) {
+    let language = app_language(app);
+    let state = app.state::<TrayTextState>();
+    let _ = state.show.set_text(text(language, Nt::TrayShow));
+    let _ = state.refresh.set_text(text(language, Nt::TrayRefresh));
+    let _ = state.quit.set_text(text(language, Nt::TrayQuit));
+    if let Some(tray) = app.tray_by_id("main-tray") {
+        let _ = tray.set_tooltip(Some(text(language, Nt::TrayTooltip)));
+    }
 }
 
 pub(crate) fn handle_close_request(window: &tauri::Window, api: &tauri::CloseRequestApi) {
@@ -305,8 +358,8 @@ pub(crate) fn handle_close_request(window: &tauri::Window, api: &tauri::CloseReq
         show_main_window(window.app_handle());
         notify(
             window.app_handle(),
-            "Import nadal trwa",
-            "Najpierw wstrzymaj lub anuluj import, a następnie zamknij aplikację.",
+            app_text(window.app_handle(), Nt::ImportStillRunning),
+            app_text(window.app_handle(), Nt::CloseRunningImport),
         );
         return;
     }
@@ -333,8 +386,8 @@ pub(crate) fn protect_running_import_on_exit(
         show_main_window(app);
         notify(
             app,
-            "Import nadal trwa",
-            "Najpierw wstrzymaj lub anuluj import, a następnie zamknij aplikację.",
+            app_text(app, Nt::ImportStillRunning),
+            app_text(app, Nt::CloseRunningImport),
         );
     }
 }
@@ -344,8 +397,8 @@ fn request_app_exit(app: &tauri::AppHandle) {
         show_main_window(app);
         notify(
             app,
-            "Import nadal trwa",
-            "Najpierw wstrzymaj lub anuluj import, a następnie zakończ aplikację.",
+            app_text(app, Nt::ImportStillRunning),
+            app_text(app, Nt::QuitRunningImport),
         );
     } else {
         app.exit(0);
@@ -360,13 +413,19 @@ fn show_main_window(app: &tauri::AppHandle) {
     }
 }
 
-pub(crate) fn announce_plan_ready(app: &tauri::AppHandle, detail: &str) {
+pub(crate) fn announce_plan_ready(app: &tauri::AppHandle, file_count: usize) {
     let settings = app.state::<SettingsService>().current_settings().ok();
+    let language = settings
+        .as_ref()
+        .map_or(importer_domain::settings::UiLanguage::En, |settings| {
+            settings.local.ui_language
+        });
+    let detail = plan_file_count(language, file_count);
     if settings
         .as_ref()
         .is_none_or(|settings| settings.local.notifications_enabled)
     {
-        notify(app, "Plan importu jest gotowy", detail);
+        notify(app, text(language, Nt::PlanReady), &detail);
     }
     if settings.is_some_and(|settings| settings.local.show_window_when_plan_ready) {
         show_main_window(app);
@@ -376,17 +435,23 @@ pub(crate) fn announce_plan_ready(app: &tauri::AppHandle, detail: &str) {
 pub(crate) fn announce_plan_ready_for_source(
     app: &tauri::AppHandle,
     source_path: &std::path::Path,
-    detail: &str,
+    file_count: usize,
 ) {
     let settings = app.state::<SettingsService>().current_settings().ok();
+    let language = settings
+        .as_ref()
+        .map_or(importer_domain::settings::UiLanguage::En, |settings| {
+            settings.local.ui_language
+        });
+    let detail = plan_file_count(language, file_count);
     if settings
         .as_ref()
         .is_none_or(|settings| settings.local.notifications_enabled)
     {
         notify_routed(
             app,
-            "Plan importu jest gotowy",
-            detail,
+            text(language, Nt::PlanReady),
+            &detail,
             Some(source_path.to_path_buf()),
         );
     }
@@ -413,58 +478,57 @@ pub(crate) fn announce_profile_confirmation_required(
 ) {
     notify_routed(
         app,
-        "Wymagane potwierdzenie aparatu",
-        "Na karcie wykryto nowy profil EXIF. Otwórz aplikację, aby go zatwierdzić.",
+        app_text(app, Nt::CameraConfirmation),
+        app_text(app, Nt::CameraConfirmationBody),
         Some(source_path.to_path_buf()),
     );
 }
 
-pub(crate) fn announce_workflow_error(app: &tauri::AppHandle, detail: &str) {
-    notify(app, "Nie udało się przygotować planu", detail);
+pub(crate) fn announce_workflow_error(app: &tauri::AppHandle, _technical_detail: &str) {
+    notify(
+        app,
+        app_text(app, Nt::WorkflowFailed),
+        app_text(app, Nt::WorkflowFailedBody),
+    );
 }
 
 pub(crate) fn announce_import_status(
     app: &tauri::AppHandle,
     session: &importer_manifest::ImportSession,
 ) {
+    let language = app_language(app);
     let (title, detail) = match session.status {
-        ImportSessionStatus::Running => ("Import rozpoczęty", "Import działa w tle.".to_owned()),
+        ImportSessionStatus::Running => (
+            text(language, Nt::ImportStarted),
+            text(language, Nt::ImportStartedBody).to_owned(),
+        ),
         ImportSessionStatus::Paused => (
-            "Import wstrzymany",
-            "Sesję można bezpiecznie wznowić.".to_owned(),
+            text(language, Nt::ImportPaused),
+            text(language, Nt::ImportPausedBody).to_owned(),
         ),
         ImportSessionStatus::FailedRecoverable => (
-            "Karta została odłączona",
-            session
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "Podłącz właściwą kartę i wybierz Wznów.".to_owned()),
+            text(language, Nt::CardDisconnected),
+            text(language, Nt::CardDisconnectedBody).to_owned(),
         ),
         ImportSessionStatus::Failed => (
-            "Błąd importu",
-            session
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "Import nie został ukończony.".to_owned()),
+            text(language, Nt::ImportFailed),
+            text(language, Nt::ImportFailedBody).to_owned(),
         ),
         ImportSessionStatus::Completed => (
-            "Import zakończony",
-            format!("Zaimportowano {} plików.", session.completed_file_count),
+            text(language, Nt::ImportCompleted),
+            imported_file_count(language, session.completed_file_count),
         ),
         ImportSessionStatus::RollingBack => (
-            "Wycofywanie importu",
-            "Usuwane są wyłącznie niezmienione pliki tej sesji.".to_owned(),
+            text(language, Nt::ImportRollingBack),
+            text(language, Nt::ImportRollingBackBody).to_owned(),
         ),
         ImportSessionStatus::RollbackFailed => (
-            "Wycofanie wymaga uwagi",
-            session
-                .last_error
-                .clone()
-                .unwrap_or_else(|| "Wycofanie można ponowić.".to_owned()),
+            text(language, Nt::RollbackNeedsAttention),
+            text(language, Nt::RollbackNeedsAttentionBody).to_owned(),
         ),
         ImportSessionStatus::Cancelled => (
-            "Import anulowany",
-            "Zakończono wycofanie lub zachowano ukończone pliki.".to_owned(),
+            text(language, Nt::ImportCancelled),
+            text(language, Nt::ImportCancelledBody).to_owned(),
         ),
         ImportSessionStatus::Planned | ImportSessionStatus::Queued => return,
     };
@@ -472,7 +536,11 @@ pub(crate) fn announce_import_status(
 }
 
 pub(crate) fn announce_import_started(app: &tauri::AppHandle) {
-    notify(app, "Import rozpoczęty", "Import działa w tle.");
+    notify(
+        app,
+        app_text(app, Nt::ImportStarted),
+        app_text(app, Nt::ImportStartedBody),
+    );
 }
 
 fn poll_sources(
@@ -492,6 +560,7 @@ fn poll_sources(
             return;
         }
     };
+    let language = settings.local.ui_language;
     let volumes = SystemSourceDiscovery.discover();
     let connected_count = volumes
         .iter()
@@ -511,7 +580,7 @@ fn poll_sources(
                 push_event(
                     status,
                     BackgroundEventKind::SourceConnected,
-                    "Karta została zapamiętana",
+                    text(language, Nt::CardRemembered),
                     connection.profile_name,
                     Some(connection.volume.mount_path),
                     None,
@@ -536,15 +605,15 @@ fn poll_sources(
                 push_event(
                     status,
                     BackgroundEventKind::SourceConnected,
-                    "Wykryto nową kartę",
+                    text(language, Nt::NewCardDetected),
                     volume.name.clone(),
                     Some(volume.mount_path.clone()),
                     None,
                 );
                 notify(
                     app,
-                    "Wykryto nową kartę pamięci",
-                    "Otwórz aplikację, aby przeskanować kartę i zatwierdzić aparat z EXIF.",
+                    text(language, Nt::NewCardNotification),
+                    text(language, Nt::NewCardNotificationBody),
                 );
                 persist_volume_state(app, &volume, SourceWorkflowState::AwaitingDecision, None);
             }
@@ -567,7 +636,7 @@ fn poll_sources(
                     let _ = manifest.update_source_workflow_state(
                         &volume.mount_path,
                         "disconnected",
-                        Some("Karta została odłączona. Podłącz ją ponownie, aby rozpocząć import."),
+                        Some(text(language, Nt::CardDisconnectedWorkflow)),
                         now_unix_ms(),
                     );
                 } else {
@@ -576,7 +645,7 @@ fn poll_sources(
                 push_event(
                     status,
                     BackgroundEventKind::SourceDisconnected,
-                    "Odłączono nośnik",
+                    text(language, Nt::MediaDisconnected),
                     volume.name,
                     Some(volume.mount_path),
                     None,
@@ -588,7 +657,7 @@ fn poll_sources(
                 push_event(
                     status,
                     BackgroundEventKind::SourceConnected,
-                    "Wykryto znaną kartę",
+                    text(language, Nt::KnownCardDetected),
                     format!("{} · {}", profile, path.display()),
                     Some(path.clone()),
                     None,
@@ -644,10 +713,8 @@ fn poll_sources(
                         });
                         notify(
                             app,
-                            "Wykryto kartę pamięci",
-                            &format!(
-                                "{profile} jest gotowy. Otwórz aplikację, aby rozpocząć skan."
-                            ),
+                            text(language, Nt::CardDetected),
+                            &card_ready(language, &profile),
                         );
                         persist_volume_state(
                             app,
@@ -677,6 +744,7 @@ fn start_automatic_scan(
     source_path: PathBuf,
     profile_name: String,
 ) {
+    let language = app_language(app);
     if let Some(volume) = SystemSourceDiscovery
         .discover()
         .into_iter()
@@ -703,18 +771,18 @@ fn start_automatic_scan(
             push_event(
                 status,
                 BackgroundEventKind::ScanStarted,
-                "Automatyczny skan rozpoczęty",
+                text(language, Nt::AutoScanStarted),
                 profile_name,
                 Some(source_path),
                 Some(scan_id),
             );
         }
-        Err(error) => {
+        Err(_error) => {
             push_event(
                 status,
                 BackgroundEventKind::ScanFailed,
-                "Nie udało się uruchomić skanu",
-                format!("{error:?}"),
+                text(language, Nt::AutoScanStartFailed),
+                text(language, Nt::ScanProblemBody),
                 Some(source_path),
                 None,
             );
@@ -727,6 +795,7 @@ fn finish_auto_scans(
     status: &Arc<Mutex<BackgroundStatus>>,
     scans: &mut HashMap<String, AutoScanContext>,
 ) {
+    let language = app_language(app);
     let scan_service = app.state::<ScanService>();
     let finished: Vec<_> = scans
         .keys()
@@ -744,30 +813,36 @@ fn finish_auto_scans(
         match job.status() {
             MediaScanJobStatus::Completed => {
                 let count = job.imported_candidate_count().unwrap_or(0);
-                let detail = format!("{}: znaleziono {count} pozycji", context.profile_name);
+                let detail = scan_result(language, &context.profile_name, count);
                 push_event(
                     status,
                     BackgroundEventKind::ScanCompleted,
-                    "Automatyczny skan zakończony",
+                    text(language, Nt::AutoScanCompleted),
                     detail,
                     Some(context.source_path),
                     Some(id),
                 );
             }
             MediaScanJobStatus::Failed | MediaScanJobStatus::Cancelled => {
-                let detail = job
-                    .error_message()
-                    .unwrap_or("Skan został anulowany.")
-                    .to_owned();
+                let detail = if job.status() == MediaScanJobStatus::Cancelled {
+                    text(language, Nt::ScanCancelled)
+                } else {
+                    text(language, Nt::ScanProblemBody)
+                }
+                .to_owned();
                 push_event(
                     status,
                     BackgroundEventKind::ScanFailed,
-                    "Automatyczny skan nie został ukończony",
+                    text(language, Nt::AutoScanIncomplete),
                     detail.clone(),
                     Some(context.source_path),
                     Some(id),
                 );
-                notify(app, "Problem podczas skanowania karty", &detail);
+                notify(
+                    app,
+                    text(language, Nt::ScanProblem),
+                    text(language, Nt::ScanProblemBody),
+                );
             }
             MediaScanJobStatus::Running => {}
         }

@@ -31,6 +31,7 @@ pub(crate) struct SettingsResponse {
 pub(crate) struct SettingsCommandError {
     code: &'static str,
     message: String,
+    technical_details: String,
     backup_available: Option<bool>,
 }
 
@@ -162,9 +163,11 @@ impl SettingsService {
 
 impl SettingsCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
             backup_available: None,
         }
     }
@@ -180,11 +183,15 @@ fn map_repository_error(error: SettingsRepositoryError) -> SettingsCommandError 
             backup_available,
             reason,
             ..
-        } => SettingsCommandError {
-            code: "corruptedPrimary",
-            message: format!("Plik ustawień jest uszkodzony. {reason}"),
-            backup_available: Some(backup_available),
-        },
+        } => {
+            let message = format!("Settings file is corrupted: {reason}");
+            SettingsCommandError {
+                code: "corruptedPrimary",
+                technical_details: message.clone(),
+                message,
+                backup_available: Some(backup_available),
+            }
+        }
         SettingsRepositoryError::BackupNotFound { .. } => SettingsCommandError::new(
             "backupNotFound",
             "Nie znaleziono poprawnej kopii poprzednich ustawień.",
@@ -270,14 +277,18 @@ pub(crate) fn save_settings(
         .map_err(|error| SettingsCommandError::new(error.code, error.message))?;
     let response = service.save(&settings)?;
     crate::background::sync_autostart(&app, settings.local.start_at_login);
+    crate::background::refresh_tray_text(&app);
     Ok(response)
 }
 
 #[tauri::command]
 pub(crate) fn restore_settings_backup(
+    app: tauri::AppHandle,
     service: tauri::State<'_, SettingsService>,
 ) -> Result<SettingsResponse, SettingsCommandError> {
-    service.restore_backup()
+    let response = service.restore_backup()?;
+    crate::background::refresh_tray_text(&app);
+    Ok(response)
 }
 
 #[tauri::command]
@@ -348,5 +359,15 @@ mod tests {
 
         assert_eq!(error.code, "invalidImportFormat");
         assert_eq!(service.load().unwrap().settings, settings);
+    }
+
+    #[test]
+    fn command_errors_serialize_technical_details_separately() {
+        let error = SettingsCommandError::new("settingsIoFailed", "os error 5");
+        let json = serde_json::to_value(error).unwrap();
+
+        assert_eq!(json["code"], "settingsIoFailed");
+        assert_eq!(json["message"], "os error 5");
+        assert_eq!(json["technicalDetails"], "os error 5");
     }
 }

@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { describeOperationalError } from "./appStatus";
+import { setAppLanguage } from "../i18n";
 
 describe("describeOperationalError", () => {
   it.each([
@@ -14,5 +15,16 @@ describe("describeOperationalError", () => {
     expect(result.impact).not.toBe("");
     expect(result.action).not.toBe("");
     expect(result.technicalDetails).not.toBe("");
+  });
+
+  it("uses the active language for user-facing error text", async () => {
+    await setAppLanguage("pl");
+
+    const result = describeOperationalError(
+      { code: "backendUnavailable", message: "IPC failed" },
+      "backend",
+    );
+
+    expect(result.title).toBe("Brak połączenia z backendem");
   });
 });

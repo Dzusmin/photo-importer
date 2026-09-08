@@ -3,7 +3,9 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use importer_domain::settings::{AppSettings, CameraProfile, SourceIdentity};
-use importer_manifest::{FileImportState, FileRecognition, SourceWorkflowRecord};
+use importer_manifest::{
+    FileImportState, FileRecognition, PhotoUserMetadata, SourceWorkflowRecord,
+};
 use importer_media::{
     EventGroup, MediaItem, MediaScan, SourceDiscovery, SourceVolume, SystemSourceDiscovery,
     apply_time_correction, ensure_source_marker, group_into_events,
@@ -82,6 +84,8 @@ pub(crate) struct WorkflowEditorState {
     pub(crate) excluded_item_keys: Vec<String>,
     #[serde(default)]
     pub(crate) item_profile_assignments: BTreeMap<String, String>,
+    #[serde(default)]
+    pub(crate) expanded_event_indexes: Vec<usize>,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +112,48 @@ pub(crate) struct TimeCorrectionResponse {
     changed_item_count: usize,
 }
 
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct PhotoUserMetadataUpdate {
+    item_key: String,
+    rating: u8,
+    rejected: bool,
+    rotation_degrees: u16,
+}
+
+#[tauri::command]
+pub(crate) fn list_photo_user_metadata(
+    source_root: PathBuf,
+    manifest: tauri::State<'_, importer_manifest::ImportManifest>,
+) -> Result<Vec<PhotoUserMetadata>, SourceCommandError> {
+    manifest
+        .list_photo_user_metadata(&source_root)
+        .map_err(|error| SourceCommandError::new("metadataLoadFailed", error.to_string()))
+}
+
+#[tauri::command]
+pub(crate) fn save_photo_user_metadata(
+    source_root: PathBuf,
+    updates: Vec<PhotoUserMetadataUpdate>,
+    manifest: tauri::State<'_, importer_manifest::ImportManifest>,
+) -> Result<(), SourceCommandError> {
+    let updated_at_unix_ms = now_unix_ms();
+    let records = updates
+        .into_iter()
+        .map(|update| PhotoUserMetadata {
+            source_root: source_root.clone(),
+            item_key: update.item_key,
+            rating: update.rating,
+            rejected: update.rejected,
+            rotation_degrees: update.rotation_degrees,
+            updated_at_unix_ms,
+        })
+        .collect::<Vec<_>>();
+    manifest
+        .save_photo_user_metadata(&records)
+        .map_err(|error| SourceCommandError::new("metadataSaveFailed", error.to_string()))
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ImportPlanPreviewRequest {
@@ -123,13 +169,16 @@ pub(crate) struct ImportPlanPreviewRequest {
 pub(crate) struct SourceCommandError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    technical_details: String,
 }
 
 impl SourceCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }
@@ -169,10 +218,7 @@ pub(crate) async fn ensure_media_source_marker(
 
 #[tauri::command]
 pub(crate) fn announce_import_plan_ready(app: tauri::AppHandle, file_count: usize) {
-    background::announce_plan_ready(
-        &app,
-        &format!("Plan obejmuje {file_count} plików i czeka na zatwierdzenie."),
-    );
+    background::announce_plan_ready(&app, file_count);
 }
 
 #[tauri::command]
@@ -256,9 +302,44 @@ pub(crate) fn save_pending_source_workflow(
 pub(crate) fn list_pending_source_workflows(
     manifest: tauri::State<'_, importer_manifest::ImportManifest>,
 ) -> Result<Vec<PendingSourceWorkflow>, SourceCommandError> {
-    manifest
+    let mut records = manifest
         .list_source_workflows()
-        .map_err(|error| SourceCommandError::new("workflowLoadFailed", error.to_string()))?
+        .map_err(|error| SourceCommandError::new("workflowLoadFailed", error.to_string()))?;
+
+    let mut reconciled = Vec::with_capacity(records.len());
+    for mut record in records.drain(..) {
+        if record.source_root.try_exists().unwrap_or(true) {
+            reconciled.push(record);
+            continue;
+        }
+
+        match missing_workflow_action(&record.state) {
+            MissingWorkflowAction::Keep => reconciled.push(record),
+            MissingWorkflowAction::MarkDisconnected => {
+                manifest
+                    .update_source_workflow_state(
+                        &record.source_root,
+                        "disconnected",
+                        record.error.as_deref(),
+                        now_unix_ms(),
+                    )
+                    .map_err(|error| {
+                        SourceCommandError::new("workflowSaveFailed", error.to_string())
+                    })?;
+                record.state = "disconnected".to_owned();
+                reconciled.push(record);
+            }
+            MissingWorkflowAction::Delete => {
+                manifest
+                    .delete_pending_workflow(&record.source_root)
+                    .map_err(|error| {
+                        SourceCommandError::new("workflowDeleteFailed", error.to_string())
+                    })?;
+            }
+        }
+    }
+
+    reconciled
         .into_iter()
         .map(|record| {
             Ok(PendingSourceWorkflow {
@@ -291,6 +372,46 @@ pub(crate) fn list_pending_source_workflows(
             })
         })
         .collect()
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MissingWorkflowAction {
+    Keep,
+    MarkDisconnected,
+    Delete,
+}
+
+fn missing_workflow_action(state: &str) -> MissingWorkflowAction {
+    match state {
+        "planReady" => MissingWorkflowAction::MarkDisconnected,
+        "disconnected" => MissingWorkflowAction::Keep,
+        _ => MissingWorkflowAction::Delete,
+    }
+}
+
+#[cfg(test)]
+mod workflow_reconciliation_tests {
+    use super::{MissingWorkflowAction, missing_workflow_action};
+
+    #[test]
+    fn removes_an_unfinished_decision_for_a_missing_source() {
+        assert_eq!(
+            missing_workflow_action("awaitingDecision"),
+            MissingWorkflowAction::Delete
+        );
+    }
+
+    #[test]
+    fn preserves_a_ready_plan_as_disconnected() {
+        assert_eq!(
+            missing_workflow_action("planReady"),
+            MissingWorkflowAction::MarkDisconnected
+        );
+        assert_eq!(
+            missing_workflow_action("disconnected"),
+            MissingWorkflowAction::Keep
+        );
+    }
 }
 
 #[tauri::command]
@@ -436,6 +557,7 @@ pub(crate) fn prepare_automatic_workflow(
                 .map(|item| item.item_key.clone())
                 .collect(),
             item_profile_assignments: profile_assignments,
+            expanded_event_indexes: Vec::new(),
         },
         updated_at_unix_ms: now_unix_ms(),
     };
@@ -465,6 +587,7 @@ pub(crate) fn prepare_automatic_workflow(
     let plan = build_import_plan(BuildImportPlanRequest {
         library_root,
         folder_template: settings.portable.naming.folder_template.clone(),
+        file_name_template: settings.portable.naming.file_name_template.clone(),
         collision_policy: settings.portable.naming.collision_policy,
         events,
         excluded_item_keys: BTreeSet::new(),
@@ -615,6 +738,7 @@ pub(crate) async fn build_import_plan_preview(
         build_import_plan(BuildImportPlanRequest {
             library_root,
             folder_template: naming.folder_template,
+            file_name_template: naming.file_name_template,
             collision_policy: naming.collision_policy,
             events: request.events,
             excluded_item_keys: request
@@ -747,5 +871,15 @@ mod tests {
         assert_eq!(result[0].state, ItemImportState::PartiallyImported);
         assert_eq!(result[0].imported_file_count, 1);
         assert_eq!(result[0].total_file_count, 2);
+    }
+
+    #[test]
+    fn older_editor_state_defaults_to_all_events_collapsed() {
+        let editor: WorkflowEditorState = serde_json::from_str(
+            r#"{"eventNames":{"1":"Wakacje"},"excludedItemKeys":[],"itemProfileAssignments":{}}"#,
+        )
+        .expect("older editor state should remain readable");
+
+        assert!(editor.expanded_event_indexes.is_empty());
     }
 }

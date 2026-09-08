@@ -96,7 +96,7 @@ fn same_size_with_different_content_is_new() {
 }
 
 #[test]
-fn database_uses_schema_version_nine() {
+fn database_uses_schema_version_ten() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("manifest.sqlite3");
     ImportManifest::open(&path).unwrap();
@@ -105,7 +105,68 @@ fn database_uses_schema_version_nine() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(version, 9);
+    assert_eq!(version, 10);
+}
+
+#[test]
+fn photo_user_metadata_survives_reopening_and_bulk_updates() {
+    use importer_manifest::PhotoUserMetadata;
+
+    let directory = tempfile::tempdir().unwrap();
+    let database = directory.path().join("manifest.sqlite3");
+    let source = directory.path().join("card");
+    let manifest = ImportManifest::open(&database).unwrap();
+    manifest
+        .save_photo_user_metadata(&[
+            PhotoUserMetadata {
+                source_root: source.clone(),
+                item_key: "photo-a".into(),
+                rating: 5,
+                rejected: false,
+                rotation_degrees: 90,
+                updated_at_unix_ms: 10,
+            },
+            PhotoUserMetadata {
+                source_root: source.clone(),
+                item_key: "photo-b".into(),
+                rating: 1,
+                rejected: true,
+                rotation_degrees: 270,
+                updated_at_unix_ms: 10,
+            },
+        ])
+        .unwrap();
+    drop(manifest);
+
+    let reopened = ImportManifest::open(database).unwrap();
+    let records = reopened.list_photo_user_metadata(&source).unwrap();
+    assert_eq!(records.len(), 2);
+    assert_eq!(records[0].rating, 5);
+    assert_eq!(records[0].rotation_degrees, 90);
+    assert!(records[1].rejected);
+}
+
+#[test]
+fn migrates_version_nine_to_photo_user_metadata_schema() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("manifest.sqlite3");
+    ImportManifest::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(&path).unwrap();
+    connection
+        .execute_batch("DROP TABLE photo_user_metadata; PRAGMA user_version = 9;")
+        .unwrap();
+    drop(connection);
+
+    ImportManifest::open(&path).unwrap();
+    let connection = rusqlite::Connection::open(path).unwrap();
+    let exists: i64 = connection
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'photo_user_metadata'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(exists, 1);
 }
 
 #[test]

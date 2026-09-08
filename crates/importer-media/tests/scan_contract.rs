@@ -46,6 +46,25 @@ fn scans_dcim_and_groups_raw_jpeg_xmp_as_one_item() {
 }
 
 #[test]
+fn ignores_appledouble_files_even_when_their_extension_is_supported() {
+    let directory = tempfile::tempdir().unwrap();
+    let dcim = directory.path().join("DCIM/100CAMERA");
+    create_file(&dcim.join("IMG_0001.JPG"), b"jpeg");
+    create_file(&dcim.join("._IMG_0001.JPG"), b"appledouble metadata");
+
+    let scan = scan_media(directory.path()).unwrap();
+
+    assert_eq!(scan.items.len(), 1);
+    assert_eq!(scan.supported_file_count, 1);
+    assert_eq!(scan.skipped_file_count, 0);
+    assert_eq!(scan.items[0].files.len(), 1);
+    assert_eq!(
+        scan.items[0].files[0].relative_path,
+        Path::new("DCIM").join("100CAMERA").join("IMG_0001.JPG")
+    );
+}
+
+#[test]
 fn keeps_video_with_the_same_stem_as_a_separate_item() {
     let directory = tempfile::tempdir().unwrap();
     create_file(&directory.path().join("CLIP.JPG"), b"photo");

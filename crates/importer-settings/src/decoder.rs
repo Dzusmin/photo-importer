@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 
+use importer_domain::settings::DEFAULT_FILE_NAME_TEMPLATE;
 use importer_domain::settings::SettingsValidationErrors;
 use importer_domain::{AppSettings, CURRENT_SETTINGS_SCHEMA_VERSION};
 use serde_json::{Value, json};
@@ -64,9 +65,17 @@ pub(crate) fn decode_settings(
                 path: path.to_path_buf(),
             })?;
 
-    if version == 1 && CURRENT_SETTINGS_SCHEMA_VERSION == 2 {
+    if version == 1 {
         migrate_v1_to_v2(&mut value);
-    } else if version != u64::from(CURRENT_SETTINGS_SCHEMA_VERSION) {
+    }
+    let migrated_version = value.get("schemaVersion").and_then(Value::as_u64);
+    if migrated_version == Some(2) {
+        migrate_v2_to_v3(&mut value);
+    }
+    let migrated_version = value.get("schemaVersion").and_then(Value::as_u64);
+    if migrated_version == Some(3) {
+        migrate_v3_to_v4(&mut value);
+    } else if migrated_version != Some(u64::from(CURRENT_SETTINGS_SCHEMA_VERSION)) {
         return Err(SettingsDecodeError::UnsupportedSchemaVersion {
             path: path.to_path_buf(),
             found: version,
@@ -89,6 +98,35 @@ pub(crate) fn decode_settings(
         })?;
 
     Ok(settings)
+}
+
+fn migrate_v2_to_v3(value: &mut Value) {
+    if let Some(naming) = value
+        .get_mut("portable")
+        .and_then(Value::as_object_mut)
+        .and_then(|portable| portable.get_mut("naming"))
+        .and_then(Value::as_object_mut)
+    {
+        naming.insert(
+            "fileNameTemplate".to_owned(),
+            json!(DEFAULT_FILE_NAME_TEMPLATE),
+        );
+    }
+    if let Some(root) = value.as_object_mut() {
+        root.insert("schemaVersion".to_owned(), json!(3));
+    }
+}
+
+fn migrate_v3_to_v4(value: &mut Value) {
+    if let Some(local) = value.get_mut("local").and_then(Value::as_object_mut) {
+        local.insert("uiLanguage".to_owned(), json!("en"));
+    }
+    if let Some(root) = value.as_object_mut() {
+        root.insert(
+            "schemaVersion".to_owned(),
+            json!(CURRENT_SETTINGS_SCHEMA_VERSION),
+        );
+    }
 }
 
 fn migrate_v1_to_v2(value: &mut Value) {
@@ -165,10 +203,7 @@ fn migrate_v1_to_v2(value: &mut Value) {
         local.insert("notificationsEnabled".to_owned(), json!(true));
     }
     if let Some(root) = value.as_object_mut() {
-        root.insert(
-            "schemaVersion".to_owned(),
-            json!(CURRENT_SETTINGS_SCHEMA_VERSION),
-        );
+        root.insert("schemaVersion".to_owned(), json!(2));
     }
 }
 

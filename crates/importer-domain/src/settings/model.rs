@@ -4,7 +4,7 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 2;
+pub const CURRENT_SETTINGS_SCHEMA_VERSION: u32 = 4;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -34,6 +34,7 @@ pub struct ImportSettings {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct NamingSettings {
     pub folder_template: String,
+    pub file_name_template: String,
     pub collision_policy: CollisionPolicy,
 }
 
@@ -66,6 +67,14 @@ pub struct LocalSettings {
     pub resume_after_restart: ResumeAfterRestart,
     pub show_window_when_plan_ready: bool,
     pub notifications_enabled: bool,
+    pub ui_language: UiLanguage,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum UiLanguage {
+    En,
+    Pl,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]

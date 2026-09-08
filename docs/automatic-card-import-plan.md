@@ -1,55 +1,54 @@
-# Automatyczne przygotowanie importu po podłączeniu karty
+# Automatic import preparation when a card is connected
 
-## Cel
+## Goal
 
-Po wykryciu karty aplikacja ma rozpoznać znany nośnik, odczytać profile aparatów
-z EXIF, wykonać skan w tle i przygotować plan importu. Sam import zawsze wymaga
-jawnego zatwierdzenia planu przez użytkownika.
+After detecting a card, the application should recognize known media, read
+camera profiles from EXIF, run a background scan, and prepare an import plan.
+The import itself must always require the user to explicitly approve the plan.
 
-Zakres tego etapu obejmuje karty źródłowe. Automatyczny backup biblioteki na
-zewnętrzny dysk pozostaje osobnym, późniejszym etapem.
+This stage covers source cards. Automatic library backup to an external drive
+remains a separate, later stage.
 
-## Uzgodnione zachowanie
+## Agreed behavior
 
-- Zachowanie jest konfigurowane osobno dla każdej karty: `ask`,
-  `autoPreparePlan` albo `ignore`.
-- Nieznana karta zawsze wymaga zatwierdzenia wykrytych profili aparatów.
-- Profil otrzymuje domyślną nazwę z `Make` i `Model`, ale użytkownik może ją
-  zmienić przed zapisem.
-- Kilka kart może korzystać z tego samego profilu aparatu.
-- Jedna karta może zawierać materiały z wielu aparatów. Powstaje jeden plan z
-  widocznymi sekcjami aparatów.
-- Materiały bez dopasowania trafiają do sekcji „Nieznany aparat” i można je
-  przypisać ręcznie.
-- Obecność `DCIM` powoduje automatyczne rozpoznanie potencjalnej karty. Nośnik
-  bez `DCIM` można przeskanować i zapamiętać ręcznie.
-- Powiadomienie systemowe otwiera aplikację, ale nie zastępuje trwałego panelu
-  oczekującej karty. Stan oczekiwania trwa do rozpoczęcia skanu, jawnego
-  zignorowania albo odłączenia nośnika.
-- Domyślnie aplikacja nie wymusza pokazania okna. Opcja „Pokaż okno po
-  przygotowaniu planu” jest konfigurowalna.
-- Pauza i anulowanie są honorowane pomiędzy całymi zestawami mediów
-  (np. RAW+JPEG+XMP), nie pomiędzy plikami jednego zestawu.
-- Odłączenie karty zatrzymuje sesję jako błąd możliwy do wznowienia.
-- Ponowne podłączenie tej samej karty wskazuje pasującą sesję bez pełnego
-  ponownego skanowania.
-- Po restarcie domyślnie wymagane jest potwierdzenie wznowienia. Użytkownik może
-  włączyć automatyczne wznowienie.
-- Anulowanie pozwala zachować ukończone pliki albo wycofać wyłącznie pliki
-  dodane przez daną sesję.
-- Domyślny limit równoległych importów wynosi 2 i może zostać zwiększony w
-  ustawieniach.
-- Funkcja ma działać na Windows, macOS i Linux.
+- Behavior is configured separately for each card: `ask`, `autoPreparePlan`, or
+  `ignore`.
+- An unknown card always requires confirmation of the detected camera profiles.
+- A profile receives a default name based on `Make` and `Model`, but the user
+  can change it before saving.
+- Several cards may use the same camera profile.
+- One card may contain media from multiple cameras. A single plan is created
+  with visible camera sections.
+- Unmatched media goes to an “Unknown camera” section and can be assigned
+  manually.
+- The presence of `DCIM` automatically identifies a potential card. Media
+  without `DCIM` can be scanned and remembered manually.
+- A system notification opens the application but does not replace the
+  persistent pending-card panel. The pending state lasts until scanning begins,
+  the card is explicitly ignored, or the medium is disconnected.
+- By default, the application does not force the window to appear. The “Show
+  window when the plan is ready” option is configurable.
+- Pause and cancellation are honored between complete media sets (for example,
+  RAW+JPEG+XMP), not between files within one set.
+- Disconnecting a card stops the session with a recoverable error.
+- Reconnecting the same card identifies the matching session without a full
+  rescan.
+- After a restart, resumption requires confirmation by default. Users may
+  enable automatic resumption.
+- Cancellation can either keep completed files or roll back only the files
+  added by that session.
+- The default concurrent-import limit is 2 and can be increased in settings.
+- The feature must work on Windows, macOS, and Linux.
 
-## Model domenowy i migracja ustawień
+## Domain model and settings migration
 
-### Schemat ustawień v2
+### Settings schema v2
 
-Zwiększyć `CURRENT_SETTINGS_SCHEMA_VERSION` do 2 i dodać jawną migrację v1 →
-v2. Obecny dekoder odrzuca każdą starszą wersję, dlatego migracja musi nastąpić
-na wartości JSON przed deserializacją i walidacją.
+Increment `CURRENT_SETTINGS_SCHEMA_VERSION` to 2 and add an explicit v1 → v2
+migration. The current decoder rejects every older version, so migration must
+operate on the JSON value before deserialization and validation.
 
-`CameraProfile` powinien opisywać aparat, a nie zachowanie karty:
+`CameraProfile` should describe a camera, not card behavior:
 
 ```text
 CameraProfile
@@ -59,8 +58,8 @@ CameraProfile
   defaultTimeOffsetSeconds
 ```
 
-Usunąć `onConnect` z profilu. Zachowanie przenieść do lokalnego powiązania
-konkretnego nośnika:
+Remove `onConnect` from the profile. Move the behavior to the local binding for
+a specific medium:
 
 ```text
 SourceBinding
@@ -73,11 +72,11 @@ SourceBinding
   lastSeenAtUnixMs
 ```
 
-`cameraProfileIds` zastępuje pojedyncze `cameraProfileId`, ponieważ jedna karta
-może zawierać zdjęcia z wielu aparatów. Dane powiązań pozostają lokalne i nie są
-eksportowane wraz z ustawieniami przenośnymi.
+`cameraProfileIds` replaces the single `cameraProfileId` because one card may
+contain photos from multiple cameras. Binding data remains local and is not
+exported with portable settings.
 
-Do `LocalSettings` dodać:
+Add the following to `LocalSettings`:
 
 ```text
 maxConcurrentImports: 2
@@ -86,28 +85,26 @@ showWindowWhenPlanReady: false
 notificationsEnabled: true
 ```
 
-Migracja zachowuje dotychczasowe działanie: dla każdego starego
-`SourceBinding` kopiuje `CameraProfile.onConnect` do nowego `behavior`, a
-pojedynczy identyfikator profilu zamienia na listę. Globalne
-`knownSourceBehavior` pozostaje wyłącznie wartością domyślną dla nowo
-rejestrowanej karty albo zostaje przemianowane na `defaultSourceBehavior`.
+The migration preserves existing behavior: for every old `SourceBinding`, it
+copies `CameraProfile.onConnect` into the new `behavior` and converts the single
+profile identifier into a list. The global `knownSourceBehavior` remains only
+the default value for a newly registered card or is renamed to
+`defaultSourceBehavior`.
 
-### Walidacja
+### Validation
 
-- Identyfikator źródła i `SourceBinding.id` muszą być unikalne.
-- Wszystkie `cameraProfileIds` muszą wskazywać istniejące profile.
-- Limit równoległości musi mieścić się w bezpiecznym zakresie, np. 1–8.
-- Profil EXIF musi mieć co najmniej jedno z pól: producent, model lub numer
-  seryjny.
-- Ten sam zarejestrowany nośnik nie może jednocześnie pełnić roli karty
-  źródłowej i celu backupu. W tym etapie należy przygotować wspólny typ roli
-  nośnika; kontrolę z rejestrem `importer-backup` podłączyć podczas realizacji
-  automatycznego backupu.
+- The source identifier and `SourceBinding.id` must be unique.
+- Every `cameraProfileIds` entry must refer to an existing profile.
+- The concurrency limit must be within a safe range, such as 1–8.
+- An EXIF profile must contain at least one of: make, model, or serial number.
+- The same registered medium cannot be both a source card and a backup target.
+  This stage should introduce a shared media-role type; connect the check to the
+  `importer-backup` registry when automatic backup is implemented.
 
-## Identyfikacja karty
+## Card identification
 
-Wprowadzić `SourceIdentity`, która przechowuje dostępne sygnały zamiast jednego
-odcisku wyliczanego z nazwy i pojemności:
+Introduce `SourceIdentity`, which stores the available signals instead of a
+single fingerprint calculated from the name and capacity:
 
 ```text
 SourceIdentity
@@ -116,29 +113,29 @@ SourceIdentity
   fallbackFingerprint
 ```
 
-Kolejność dopasowania:
+Matching priority:
 
-1. UUID znacznika aplikacji zapisany na karcie.
-2. Stabilny identyfikator woluminu udostępniany przez system.
-3. Obecny odcisk nazwy, systemu plików i pojemności jako fallback wymagający
-   ostrożniejszego potwierdzenia.
+1. The UUID from an application marker stored on the card.
+2. A stable volume identifier provided by the operating system.
+3. The existing fingerprint of the name, filesystem, and capacity as a
+   fallback that requires more careful confirmation.
 
-Znacznik powinien być małym, wersjonowanym plikiem, np.
-`.photo-importer/source.json`. Jego zapis jest opcjonalny. Karta tylko do odczytu
-albo karta, na której zapis się nie powiedzie, nadal może zostać zarejestrowana.
+The marker should be a small, versioned file, such as
+`.photo-importer/source.json`. Writing it is optional. A read-only card or a
+card on which writing fails can still be registered.
 
-Adaptery identyfikatora woluminu umieścić za wspólnym traitem w
-`importer-media`, z implementacjami dla Windows, macOS i Linux. Nie opierać
-logiki domenowej na literze dysku lub ścieżce montowania.
+Place volume-identifier adapters behind a shared trait in `importer-media`,
+with implementations for Windows, macOS, and Linux. Do not base domain logic on
+a drive letter or mount path.
 
-Po sformatowaniu lub zmianie identyfikatorów karta może zostać przedstawiona
-jako prawdopodobnie znana. Aplikacja pokazuje wtedy ponowne potwierdzenie zamiast
-automatycznie uruchamiać pracę.
+After formatting or an identifier change, a card may be presented as probably
+known. The application then asks for confirmation again instead of starting
+work automatically.
 
-## Odczyt i dopasowanie EXIF
+## Reading and matching EXIF
 
-Rozszerzyć `importer-media::metadata` z `CaptureTimeReader` do czytnika pełnych
-metadanych potrzebnych podczas skanu:
+Extend `importer-media::metadata` from `CaptureTimeReader` to a reader for all
+metadata required during a scan:
 
 ```text
 MediaMetadata
@@ -146,42 +143,42 @@ MediaMetadata
   cameraIdentity? { make, model, serialNumber }
 ```
 
-Czytać `Make`, `Model` i dostępne tagi numeru seryjnego. Wartości normalizować
-przez usunięcie zbędnych spacji i porównywać bez uwzględniania wielkości liter,
-ale zachowywać oryginalną pisownię do prezentacji.
+Read `Make`, `Model`, and available serial-number tags. Normalize values by
+removing redundant whitespace and compare them case-insensitively, while
+retaining their original spelling for display.
 
-Każdy `MediaItem` otrzymuje `cameraIdentity` i `cameraProfileId?`. Dla zestawu
-RAW+JPEG+XMP:
+Every `MediaItem` receives `cameraIdentity` and `cameraProfileId?`. For a
+RAW+JPEG+XMP set:
 
-- metadane czytać z RAW i JPEG,
-- XMP dziedziczy aparat zestawu,
-- zgodne wyniki scalać,
-- sprzeczne wyniki oznaczać ostrzeżeniem i przypisywać do „Nieznany aparat” do
-  czasu decyzji użytkownika.
+- read metadata from RAW and JPEG,
+- let XMP inherit the camera of the set,
+- merge matching results,
+- mark conflicting results with a warning and assign them to “Unknown camera”
+  until the user decides.
 
-Dopasowanie do profilu:
+Profile matching order:
 
-1. dokładny numer seryjny, jeśli jest dostępny,
-2. producent + model,
-3. brak jednoznacznego dopasowania → „Nieznany aparat”.
+1. exact serial number, when available,
+2. make + model,
+3. no unambiguous match → “Unknown camera.”
 
-Nie tworzyć profili bez akceptacji użytkownika. Kreator rejestracji pokazuje
-liczbę pozycji dla każdej znalezionej tożsamości, proponowaną nazwę oraz pola
-EXIF. Pozwala użyć istniejącego profilu, utworzyć nowy lub pozostawić materiały
-jako nieznane.
+Do not create profiles without user approval. The registration wizard shows
+the item count for each discovered identity, the proposed name, and the EXIF
+fields. It allows the user to select an existing profile, create a new one, or
+leave the media unknown.
 
-## Monitor kart i trwały stan oczekiwania
+## Card monitor and persistent pending state
 
-Rozszerzyć `importer-background` tak, aby obserwował:
+Extend `importer-background` so that it monitors:
 
-- znane karty,
-- nieznane potencjalne karty z `DCIM`,
-- ręcznie wskazane nośniki bez `DCIM`, gdy użytkownik wybierze ich skanowanie.
+- known cards,
+- unknown potential cards containing `DCIM`,
+- manually selected media without `DCIM` when the user chooses to scan them.
 
-`SourceConnection` powinno zwracać powiązanie karty i zachowanie per karta,
-zamiast nazwy pojedynczego profilu.
+`SourceConnection` should return the card binding and per-card behavior instead
+of the name of a single profile.
 
-Wprowadzić stan przepływu źródła:
+Introduce the following source workflow states:
 
 ```text
 detected
@@ -196,173 +193,179 @@ failedRecoverable
 ignoredUntilDisconnect
 ```
 
-Lista oczekujących kart powinna być częścią `BackgroundStatus`, a nie tylko
-ulotnym wpisem w historii zdarzeń. Dzięki temu React może odtworzyć panel po
-ponownym otwarciu okna. Po restarcie aplikacji podłączona karta zostanie ponownie
-wykryta i wróci do odpowiedniego stanu.
+The pending-card list should be part of `BackgroundStatus`, not merely a
+transient entry in the event history. This allows React to restore the panel
+after the window is reopened. After restarting the application, a connected
+card is detected again and returns to the appropriate state.
 
-Tryb `ask` tworzy `awaitingDecision`. `autoPreparePlan` rozpoczyna skan, ale dla
-niezatwierdzonych zmian profili zatrzymuje się na
-`awaitingProfileConfirmation`. `ignore` ustawia `ignoredUntilDisconnect`.
+The `ask` mode creates `awaitingDecision`. `autoPreparePlan` starts a scan but
+stops at `awaitingProfileConfirmation` when profile changes have not been
+approved. `ignore` sets `ignoredUntilDisconnect`.
 
-Polecenie „Tym razem ignoruj” nigdy nie zapisuje trwałej zmiany zachowania.
+The “Ignore this time” command never saves a persistent behavior change.
 
-## Automatyczne przygotowanie planu
+## Automatic plan preparation
 
-Po zakończeniu skanu automat powinien użyć tej samej ścieżki domenowej i IPC co
-skan ręczny:
+After a scan finishes, the automation should use the same domain and IPC path
+as a manual scan:
 
-1. porównać zawartość z manifestem importów,
-2. dopasować albo zatwierdzić profile aparatów,
-3. utworzyć domyślne nazwy wydarzeń,
-4. przygotować plan,
-5. zapisać plan jako oczekujący do zatwierdzenia,
-6. wysłać zdarzenie `plan-ready` i powiadomienie systemowe.
+1. compare content with the import manifest,
+2. match or confirm camera profiles,
+3. create default event names,
+4. prepare the plan,
+5. save the plan as pending approval,
+6. emit a `plan-ready` event and a system notification.
 
-`ImportPlan` trzeba rozszerzyć o sekcje aparatów albo stabilne
-`cameraProfileId` przy pozycjach. Kontekst zmiennych nazewnictwa
-(`camera_make`, `camera_model`, `camera_alias`) musi być liczony per pozycja, a
-nie — jak obecnie — raz dla całego skanu.
+`ImportPlan` must be extended with camera sections or a stable
+`cameraProfileId` on each item. The naming-variable context (`camera_make`,
+`camera_model`, `camera_alias`) must be calculated per item, rather than once
+for the entire scan as it is now.
 
-Plan nie może automatycznie uruchomić kopiowania. Użytkownik może zmienić
-przypisania aparatów, nazwy wydarzeń i wykluczenia, a każda taka zmiana unieważnia
-poprzedni plan i wymaga jego ponownego przeliczenia.
+The plan must not start copying automatically. Users may change camera
+assignments, event names, and exclusions; each such change invalidates the
+previous plan and requires it to be recalculated.
 
-Stan gotowego planu należy zapisać trwale, najlepiej w SQLite obok sesji
-importów. Nie przechowywać wyłącznie obiektu React lub pamięci procesu. Zapis
-powinien zawierać tożsamość źródła, wynik skanu potrzebny do odtworzenia widoku,
-wersję ustawień/nazewnictwa i status zatwierdzenia.
+The ready-plan state must be persisted, preferably in SQLite alongside import
+sessions. Do not store it only as a React object or in process memory. The
+record should contain the source identity, the scan result needed to restore
+the view, the settings/naming version, and the approval status.
 
-## Sesje importu, pauza i odporność na odłączenie
+## Import sessions, pause, and resilience to disconnection
 
-Obecny executor zapisuje operacje per plik i sprawdza żądania sterujące przed
-każdą operacją. Zmienić jednostkę sterowania na `item_key`:
+The current executor records operations per file and checks control requests
+before each operation. Change the control unit to `item_key`:
 
-- rozpoczęty zestaw RAW+JPEG+XMP kończy się w całości,
-- pauza lub anulowanie jest wykonywane przed następnym `item_key`,
-- postęp nadal może być raportowany per plik,
-- w trybie przenoszenia źródła zestawu usuwać dopiero po zweryfikowaniu całego
-  zestawu.
+- a started RAW+JPEG+XMP set finishes in full,
+- pause or cancellation takes effect before the next `item_key`,
+- progress can still be reported per file,
+- in move mode, delete a set's source files only after the entire set has been
+  verified.
 
-Błędy I/O sklasyfikować. Brak źródła lub zmiana punktu montowania daje
-`sourceUnavailable` i status `failedRecoverable`, a nie ogólny błąd. Częściowy
-plik docelowy nie jest publikowany; przy wznowieniu bieżąca operacja zaczyna się
-ponownie i przechodzi pełną weryfikację SHA-256.
+Classify I/O errors. A missing source or changed mount point produces
+`sourceUnavailable` and the `failedRecoverable` status rather than a generic
+error. A partial target file is not published; on resumption, the current
+operation starts over and undergoes full SHA-256 verification.
 
-Przy ponownym podłączeniu karty monitor wyszukuje nieukończone sesje po
-`SourceIdentity`, aktualizuje bieżący root źródła i sprawdza przed wznowieniem:
+When a card is reconnected, the monitor looks up incomplete sessions by
+`SourceIdentity`, updates the current source root, and checks the following
+before resuming:
 
-- czy wszystkie oczekujące ścieżki względne istnieją,
-- czy rozmiary są zgodne z zapisanym planem,
-- czy ukończone pliki docelowe nadal odpowiadają manifestowi.
+- all pending relative paths exist,
+- sizes match the saved plan,
+- completed target files still match the manifest.
 
-Brak pełnego reskanu nie oznacza pominięcia tej kontroli integralności.
+Skipping a full rescan does not mean skipping this integrity check.
 
-Po uruchomieniu aplikacji istniejące sesje `running` nadal są odzyskiwane jako
-wstrzymane. Warstwa aplikacji pokazuje decyzję „Wznów”, chyba że ustawiono
-`resumeAfterRestart = automatic` i właściwa karta jest dostępna.
+After application startup, existing `running` sessions continue to be
+recovered as paused. The application layer presents a “Resume” decision unless
+`resumeAfterRestart = automatic` is set and the correct card is available.
 
-## Anulowanie i bezpieczne wycofanie
+## Cancellation and safe rollback
 
-Rozszerzyć komendę anulowania o tryb:
+Extend the cancellation command with a mode:
 
 ```text
 keepCompleted
 rollbackSession
 ```
 
-Do manifestu dodać powiązanie zaimportowanego rekordu z sesją. Wycofanie może
-usunąć plik tylko wtedy, gdy:
+Add a link between an imported record and its session to the manifest. A
+rollback may delete a file only when:
 
-- został opublikowany przez wskazaną sesję,
-- nadal znajduje się pod zapisaną ścieżką docelową,
-- jego bieżący SHA-256 odpowiada wartości zapisanej po imporcie.
+- it was published by the specified session,
+- it is still located at the recorded target path,
+- its current SHA-256 matches the value saved after import.
 
-Jeśli użytkownik zmienił plik po imporcie, aplikacja nie usuwa go i raportuje
-konflikt wymagający ręcznej decyzji. Usunięcie pliku i rekordu manifestu powinno
-być rejestrowane etapami, aby przerwany rollback można było wznowić. Nie usuwać
-folderów, chyba że są puste i zostały utworzone przez tę sesję.
+If the user changed a file after import, the application does not delete it and
+reports a conflict requiring a manual decision. File and manifest-record
+deletion should be recorded in stages so that an interrupted rollback can be
+resumed. Do not delete directories unless they are empty and were created by
+the session.
 
-Dla trybu `MoveAfterVerification` rollback nie może obiecywać odtworzenia pliku
-na karcie, jeśli źródło zostało już usunięte. UI musi wtedy jasno pokazać, że
-możliwe jest tylko usunięcie kopii z biblioteki, co oznaczałoby utratę jedynej
-kopii. Domyślnie rollback dla takich zestawów powinien być zablokowany albo
-wymagać dodatkowego ostrzeżenia.
+For `MoveAfterVerification` mode, rollback cannot promise to restore a file to
+the card if the source has already been deleted. The UI must clearly explain
+that only deleting the library copy is possible, which would mean losing the
+only copy. By default, rollback for such sets should be blocked or require an
+additional warning.
 
-## Równoległość i rezerwacja ścieżek
+## Concurrency and path reservation
 
-Zastąpić bezpośrednie uruchamianie każdej sesji kolejką zarządzaną przez
-`ImportService`:
+Replace direct startup of each session with a queue managed by `ImportService`:
 
-- limit globalny pochodzi z `maxConcurrentImports`, domyślnie 2,
-- jedna karta może mieć najwyżej jedną aktywną sesję,
-- różne karty mogą importować równolegle,
-- zmiana limitu wpływa na nowe uruchomienia, bez przerywania trwających zestawów.
+- the global limit comes from `maxConcurrentImports` and defaults to 2,
+- one card may have at most one active session,
+- different cards may import concurrently,
+- changing the limit affects new starts without interrupting sets already in
+  progress.
 
-Plany przygotowane równolegle mogą wskazać tę samą ścieżkę. Dodać trwałą
-rezerwację ścieżek docelowych dla aktywnych planów/sesji. Zatwierdzenie planu
-wykonuje atomową kontrolę kolizji z systemem plików i rezerwacjami innych sesji.
-Rezerwacje zwalniać po zakończeniu, anulowaniu lub skutecznym rollbacku.
+Plans prepared concurrently may point to the same path. Add persistent target
+path reservations for active plans/sessions. Plan approval performs an atomic
+collision check against the filesystem and reservations held by other
+sessions. Release reservations after completion, cancellation, or successful
+rollback.
 
 ## UX
 
-### Panel oczekujących kart
+### Pending-card panel
 
-Na ekranie startowym dodać trwałą listę kart wymagających uwagi. Każda karta
-pokazuje nazwę, pojemność, punkt montowania, stan oraz akcje właściwe dla stanu.
+Add a persistent list of cards requiring attention to the home screen. Each
+card shows its name, capacity, mount point, state, and actions appropriate for
+that state.
 
-Dla `awaitingDecision`:
+For `awaitingDecision`:
 
-- „Skanuj i przygotuj plan”,
-- „Tym razem ignoruj”,
-- „Zmień zachowanie tej karty”.
+- “Scan and prepare plan,”
+- “Ignore this time,”
+- “Change this card's behavior.”
 
-Dla `awaitingProfileConfirmation`:
+For `awaitingProfileConfirmation`:
 
-- lista znalezionych aparatów i liczba pozycji,
-- wybór istniejącego profilu lub utworzenie nowego,
-- edytowalna proponowana nazwa,
-- sekcja „Nieznany aparat”.
+- a list of discovered cameras and item counts,
+- selection of an existing profile or creation of a new one,
+- an editable proposed name,
+- an “Unknown camera” section.
 
-Dla `planReady`:
+For `planReady`:
 
-- „Otwórz plan”,
-- krótkie podsumowanie liczby aparatów, wydarzeń, plików i rozmiaru.
+- “Open plan,”
+- a short summary of the number of cameras, events, files, and total size.
 
 ### Plan
 
-Wynik grupować najpierw według aparatu, następnie według wydarzenia. Sekcja
-„Nieznany aparat” ma akcję zbiorczego lub pojedynczego przypisania profilu.
-Przeniesienie pozycji między profilami natychmiast unieważnia plan.
+Group results first by camera and then by event. The “Unknown camera” section
+has bulk and individual profile-assignment actions. Moving an item between
+profiles immediately invalidates the plan.
 
-### Sterowanie sesją
+### Session controls
 
-- Pasek pokazuje postęp bajtów i zestawów oraz aktualny plik.
-- „Pauza” wyświetla „Zatrzymywanie po bieżącym zestawie…”.
-- „Anuluj” otwiera wybór „Zachowaj ukończone” / „Wycofaj tę sesję”.
-- `sourceUnavailable` pokazuje nazwę oczekiwanej karty i przycisk „Wznów” po jej
-  ponownym podłączeniu.
-- Po restarcie sesja ma czytelny status „Przerwano przez zamknięcie aplikacji”.
+- The progress bar shows byte and set progress and the current file.
+- “Pause” displays “Stopping after the current set…”.
+- “Cancel” opens a “Keep completed” / “Roll back this session” choice.
+- `sourceUnavailable` shows the expected card's name and a “Resume” button once
+  it is reconnected.
+- After a restart, the session has a clear “Interrupted when the application
+  closed” status.
 
-## Powiadomienia systemowe
+## System notifications
 
-Wysyłać powiadomienia dla:
+Send notifications for:
 
-- wykrycia znanej karty w trybie `ask`,
-- wymaganej akceptacji nowych profili,
-- gotowego planu,
-- rozpoczęcia importu działającego w tle,
-- pauzy lub odłączenia źródła,
-- błędu, w tym braku miejsca i błędu weryfikacji,
-- zakończenia i wyniku rollbacku.
+- detection of a known card in `ask` mode,
+- required approval of new profiles,
+- a ready plan,
+- the start of an import running in the background,
+- a pause or source disconnection,
+- an error, including insufficient space and verification failure,
+- completion and the rollback result.
 
-Kliknięcie powiadomienia otwiera właściwą kartę/panel w aplikacji. Powiadomienia
-nie zatwierdzają planu ani nie wykonują destrukcyjnych akcji. Wyłączenie
-powiadomień nie usuwa informacji z trwałego panelu i historii zdarzeń.
+Clicking a notification opens the appropriate tab/panel in the application.
+Notifications do not approve a plan or perform destructive actions. Disabling
+notifications does not remove information from the persistent panel or event
+history.
 
-## API Tauri i zdarzenia
+## Tauri API and events
 
-Docelowe komendy:
+Target commands:
 
 - `list_source_workflows`
 - `start_source_workflow`
@@ -376,7 +379,7 @@ Docelowe komendy:
 - `cancel_import_session { mode }`
 - `retry_import_rollback`
 
-Zdarzenia:
+Events:
 
 - `source-workflow-changed`
 - `source-profile-confirmation-required`
@@ -385,139 +388,142 @@ Zdarzenia:
 - `import-source-unavailable`
 - `rollback-progress`
 
-Komendy i zdarzenia powinny używać tych samych serializowanych modeli, aby
-odświeżenie okna dawało ten sam stan co aktualizacje na żywo.
+Commands and events should use the same serialized models so that refreshing
+the window yields the same state as live updates.
 
-## Kolejność realizacji
+## Implementation order
 
-### Etap 1 — model i migracje
+### Stage 1 — model and migrations
 
-- Schemat ustawień v2 i migracja v1 → v2.
-- Zachowanie per karta i lista profili per powiązanie.
-- Nowe ustawienia lokalne.
-- Migracje SQLite dla trwałych planów, powiązania rekordów z sesją i rezerwacji.
+- Settings schema v2 and the v1 → v2 migration.
+- Per-card behavior and a profile list per binding.
+- New local settings.
+- SQLite migrations for persistent plans, record-to-session links, and
+  reservations.
 
-Kryterium odbioru: istniejący `settings.json` i manifest otwierają się bez utraty
-ustawień ani historii importów.
+Acceptance criterion: an existing `settings.json` and manifest open without
+losing settings or import history.
 
-### Etap 2 — identyfikacja nośników
+### Stage 2 — media identification
 
-- `SourceIdentity` i logika dopasowania.
-- Opcjonalny marker UUID.
-- Adaptery systemowe i fallback.
-- Rozpoznawanie prawdopodobnie znanej karty po zmianie identyfikatora.
+- `SourceIdentity` and matching logic.
+- Optional UUID marker.
+- System adapters and fallback.
+- Recognition of a probably known card after an identifier change.
 
-Kryterium odbioru: ta sama karta jest rozpoznawana po zmianie litery/punktu
-montowania, a dwie podobne karty nie są bez potwierdzenia traktowane jako jedna.
+Acceptance criterion: the same card is recognized after a drive-letter/mount
+point change, while two similar cards are not treated as one without
+confirmation.
 
-### Etap 3 — EXIF i profile
+### Stage 3 — EXIF and profiles
 
-- Pełny `MediaMetadataReader`.
-- Tożsamość aparatu przy `MediaItem`.
-- Dopasowanie wielu profili i obsługa sprzeczności.
-- Kreator zatwierdzania profili.
+- Full `MediaMetadataReader`.
+- Camera identity on `MediaItem`.
+- Multiple-profile matching and conflict handling.
+- Profile confirmation wizard.
 
-Kryterium odbioru: skan mieszanej karty tworzy poprawne sekcje aparatów i
-„Nieznany aparat”, bez automatycznego zapisania profilu.
+Acceptance criterion: scanning a mixed card creates correct camera sections
+and “Unknown camera” without automatically saving a profile.
 
-### Etap 4 — automat skan → plan
+### Stage 4 — automatic scan → plan
 
-- Nowa maszyna stanów monitora.
-- Trwały panel kart wymagających decyzji.
-- Automatyczne przygotowanie i utrwalenie planu.
-- Kontekst nazewnictwa per pozycja.
+- New monitor state machine.
+- Persistent panel for cards requiring a decision.
+- Automatic plan preparation and persistence.
+- Per-item naming context.
 
-Kryterium odbioru: tryb automatyczny kończy się na gotowym, niezatwierdzonym
-planie także przy ukrytym oknie aplikacji.
+Acceptance criterion: automatic mode ends with a ready, unapproved plan even
+when the application window is hidden.
 
-### Etap 5 — odporna sesja importu
+### Stage 5 — resilient import session
 
-- Sterowanie na granicach `item_key`.
-- Klasyfikacja odłączenia źródła.
-- Ponowne powiązanie rootu po podłączeniu.
-- Weryfikacja stanu i wznowienie po odłączeniu/restarcie.
+- Control at `item_key` boundaries.
+- Source-disconnection classification.
+- Root rebinding after reconnection.
+- State verification and resumption after disconnection/restart.
 
-Kryterium odbioru: odłączenie podczas dużego zestawu nie publikuje uszkodzonego
-pliku, a wznowienie kończy import z poprawnymi hashami.
+Acceptance criterion: disconnecting during a large set does not publish a
+corrupt file, and resumption completes the import with correct hashes.
 
-### Etap 6 — rollback i równoległość
+### Stage 6 — rollback and concurrency
 
-- Dwa tryby anulowania.
-- Bezpieczny, wznawialny rollback.
-- Kolejka importów, limit i rezerwacje ścieżek.
+- Two cancellation modes.
+- Safe, resumable rollback.
+- Import queue, limit, and path reservations.
 
-Kryterium odbioru: dwie karty mogą importować równolegle bez kolizji, a rollback
-nie usuwa pliku zmienionego poza aplikacją.
+Acceptance criterion: two cards can import concurrently without collisions,
+and rollback does not delete a file changed outside the application.
 
-### Etap 7 — integracja systemowa i finalne UX
+### Stage 7 — system integration and final UX
 
-- Powiadomienia z nawigacją do właściwego panelu.
-- Ustawienia autostartu, automatycznego wznowienia i pokazywania okna.
-- Dopracowanie zasobnika i historii zdarzeń.
-- Testy instalowanych buildów na wszystkich systemach.
+- Notifications with navigation to the appropriate panel.
+- Autostart, automatic-resume, and show-window settings.
+- Refined tray and event history.
+- Tests of installed builds on every operating system.
 
-Kryterium odbioru: cały scenariusz działa z ukrytym oknem i po restarcie
-aplikacji na Windows, macOS i Linux.
+Acceptance criterion: the complete scenario works with a hidden window and
+after restarting the application on Windows, macOS, and Linux.
 
-## Strategia testów
+## Test strategy
 
-### Rust — testy jednostkowe
+### Rust — unit tests
 
-- migracja ustawień v1 → v2,
-- walidacja zachowania i profili per karta,
-- priorytety `SourceIdentity`,
-- normalizacja oraz dopasowanie EXIF,
-- mieszane aparaty i sprzeczny RAW/JPEG,
-- przejścia maszyny stanów monitora,
-- pauza/anulowanie wyłącznie między `item_key`,
-- bezpieczne warunki rollbacku,
-- limit kolejki i rezerwacje ścieżek.
+- settings migration from v1 → v2,
+- per-card behavior and profile validation,
+- `SourceIdentity` priorities,
+- EXIF normalization and matching,
+- mixed cameras and conflicting RAW/JPEG,
+- monitor state-machine transitions,
+- pause/cancellation only between `item_key` values,
+- safe rollback conditions,
+- queue limit and path reservations.
 
-### Rust — testy integracyjne
+### Rust — integration tests
 
-- skan → zatwierdzenie profili → plan → import,
-- odłączenie przez zniknięcie katalogu źródłowego → ponowne podłączenie pod inną
-  ścieżką → wznowienie,
-- restart pomiędzy kopiowaniem i weryfikacją,
-- dwa równoległe importy do jednej biblioteki,
-- kolizja planów przygotowanych równolegle,
-- rollback pełny, częściowy i przerwany,
-- ochrona pliku zmienionego po imporcie.
+- scan → profile approval → plan → import,
+- disconnection through disappearance of the source directory → reconnection
+  at another path → resumption,
+- restart between copying and verification,
+- two concurrent imports into one library,
+- collision between plans prepared concurrently,
+- full, partial, and interrupted rollback,
+- protection of a file changed after import.
 
 ### React/Vitest
 
-- panel oczekującej karty nie znika po zamknięciu powiadomienia,
-- „Tym razem ignoruj” działa do odłączenia,
-- obowiązkowe zatwierdzenie profili,
-- sekcje wielu aparatów i ręczne przypisanie nieznanych pozycji,
-- unieważnienie planu po edycji,
-- komunikaty pauzy, odłączenia, wznowienia i rollbacku,
-- odtworzenie stanu po ponownym zamontowaniu komponentu.
+- the pending-card panel remains after the notification is dismissed,
+- “Ignore this time” lasts until disconnection,
+- mandatory profile approval,
+- multiple-camera sections and manual assignment of unknown items,
+- plan invalidation after editing,
+- pause, disconnection, resumption, and rollback messages,
+- state restoration after remounting the component.
 
-### Testy platformowe
+### Platform tests
 
-Na każdym systemie sprawdzić build instalowany, nie tylko tryb developerski:
+Test an installed build on every operating system, not only development mode:
 
-- wykrycie i usunięcie karty,
-- stabilność identyfikatora po zmianie punktu montowania,
-- kartę tylko do odczytu,
-- powiadomienia i kliknięcie prowadzące do aplikacji,
-- autostart w tle,
-- usypianie i wybudzanie systemu,
-- brak uprawnień oraz brak miejsca w bibliotece.
+- card detection and removal,
+- identifier stability after a mount-point change,
+- a read-only card,
+- notifications and a click that opens the application,
+- background autostart,
+- system sleep and wake,
+- insufficient permissions and insufficient library space.
 
-## Warunki ukończenia funkcji
+## Feature completion criteria
 
-Funkcja jest gotowa, gdy:
+The feature is complete when:
 
-1. żadna ścieżka automatyczna nie rozpoczyna importu bez zatwierdzenia planu,
-2. profile wykryte z EXIF nigdy nie są zapisywane bez potwierdzenia,
-3. zachowanie jest niezależne per karta,
-4. pauza i anulowanie nie rozdzielają zestawu RAW+JPEG+XMP,
-5. odłączenie i restart nie prowadzą do uszkodzonego ani uznanego za ukończony
-   pliku,
-6. wznowienie sprawdza tożsamość karty i integralność oczekujących danych,
-7. rollback usuwa wyłącznie niezmienione wyniki wskazanej sesji,
-8. limit równoległości i rezerwacje chronią wspólną bibliotekę,
-9. stan wymagający uwagi jest dostępny w aplikacji niezależnie od powiadomień,
-10. scenariusze odbiorcze przechodzą na Windows, macOS i Linux.
+1. no automatic path starts an import without plan approval,
+2. profiles detected from EXIF are never saved without confirmation,
+3. behavior is independent for each card,
+4. pause and cancellation do not split a RAW+JPEG+XMP set,
+5. disconnection and restart do not result in a corrupt file or one incorrectly
+   considered complete,
+6. resumption verifies the card identity and integrity of pending data,
+7. rollback deletes only unchanged results of the specified session,
+8. the concurrency limit and reservations protect the shared library,
+9. a state requiring attention is available in the application independently
+   of notifications,
+10. acceptance scenarios pass on Windows, macOS, and Linux.

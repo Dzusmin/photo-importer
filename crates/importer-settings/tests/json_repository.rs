@@ -1,6 +1,7 @@
 use std::fs;
 use std::path::PathBuf;
 
+use importer_domain::settings::UiLanguage;
 use importer_domain::{AppSettings, CURRENT_SETTINGS_SCHEMA_VERSION};
 use importer_settings::{
     JsonSettingsRepository, SettingsDecodeError, SettingsLoadSource, SettingsRepository,
@@ -63,8 +64,13 @@ fn version_one_settings_are_migrated_to_per_card_behavior() {
 
     let migrated = repository.load().unwrap().settings;
 
-    assert_eq!(migrated.schema_version, 2);
+    assert_eq!(migrated.schema_version, CURRENT_SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.portable.naming.file_name_template,
+        "{original_name}"
+    );
     assert_eq!(migrated.local.max_concurrent_imports, 2);
+    assert_eq!(migrated.local.ui_language, UiLanguage::En);
     assert_eq!(migrated.local.source_bindings.len(), 1);
     assert_eq!(
         migrated.local.source_bindings[0].behavior,
@@ -74,6 +80,34 @@ fn version_one_settings_are_migrated_to_per_card_behavior() {
         migrated.local.source_bindings[0].camera_profile_ids.len(),
         1
     );
+}
+
+#[test]
+fn version_two_settings_receive_the_compatible_file_name_template() {
+    let (_directory, repository) = repository();
+    let legacy = include_bytes!("../../importer-domain/tests/fixtures/settings-v2.json");
+    write(&repository.primary_path(), legacy);
+
+    let migrated = repository.load().unwrap().settings;
+
+    assert_eq!(migrated.schema_version, CURRENT_SETTINGS_SCHEMA_VERSION);
+    assert_eq!(
+        migrated.portable.naming.file_name_template,
+        "{original_name}"
+    );
+    assert_eq!(migrated.local.ui_language, UiLanguage::En);
+}
+
+#[test]
+fn version_three_settings_receive_the_default_ui_language() {
+    let (_directory, repository) = repository();
+    let legacy = include_bytes!("../../importer-domain/tests/fixtures/settings-v3.json");
+    write(&repository.primary_path(), legacy);
+
+    let migrated = repository.load().unwrap().settings;
+
+    assert_eq!(migrated.schema_version, CURRENT_SETTINGS_SCHEMA_VERSION);
+    assert_eq!(migrated.local.ui_language, UiLanguage::En);
 }
 
 #[test]

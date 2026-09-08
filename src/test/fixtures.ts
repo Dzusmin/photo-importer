@@ -9,7 +9,7 @@ import type { BackgroundStatus } from "../shared/background";
 
 export function settingsFixture(): AppSettings {
   return {
-    schemaVersion: 2,
+    schemaVersion: 4,
     portable: {
       import: {
         defaultOperation: "copy",
@@ -18,6 +18,7 @@ export function settingsFixture(): AppSettings {
       },
       naming: {
         folderTemplate: "{year}/{date}-{event_name}",
+        fileNameTemplate: "{original_name}",
         collisionPolicy: "ask",
       },
       cameraProfiles: [],
@@ -31,6 +32,7 @@ export function settingsFixture(): AppSettings {
       resumeAfterRestart: "ask",
       showWindowWhenPlanReady: false,
       notificationsEnabled: true,
+      uiLanguage: "en",
     },
   };
 }

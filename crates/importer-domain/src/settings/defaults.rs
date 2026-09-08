@@ -1,12 +1,14 @@
 use super::{
     AppSettings, CURRENT_SETTINGS_SCHEMA_VERSION, CollisionPolicy, ImportOperation, ImportSettings,
     LocalSettings, NamingSettings, PortableSettings, ResumeAfterRestart, SourceBehavior,
+    UiLanguage,
 };
 
 pub const MIN_EVENT_GAP_MINUTES: u32 = 1;
 pub const MAX_EVENT_GAP_MINUTES: u32 = 7 * 24 * 60;
 pub const DEFAULT_EVENT_GAP_MINUTES: u32 = 120;
 pub const DEFAULT_FOLDER_TEMPLATE: &str = "{year}/{date}-{event_name}";
+pub const DEFAULT_FILE_NAME_TEMPLATE: &str = "{original_name}";
 
 impl Default for AppSettings {
     fn default() -> Self {
@@ -32,6 +34,7 @@ impl Default for NamingSettings {
     fn default() -> Self {
         Self {
             folder_template: DEFAULT_FOLDER_TEMPLATE.to_owned(),
+            file_name_template: DEFAULT_FILE_NAME_TEMPLATE.to_owned(),
             collision_policy: CollisionPolicy::Ask,
         }
     }
@@ -48,6 +51,7 @@ impl Default for LocalSettings {
             resume_after_restart: ResumeAfterRestart::Ask,
             show_window_when_plan_ready: false,
             notifications_enabled: true,
+            ui_language: UiLanguage::En,
         }
     }
 }

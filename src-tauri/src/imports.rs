@@ -43,6 +43,7 @@ pub(crate) struct CreateSessionRequest {
 pub(crate) struct ImportCommandError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    technical_details: String,
 }
 
 #[derive(Debug, Clone, Copy, Deserialize)]
@@ -171,9 +172,11 @@ fn spawn_import_worker(
 
 impl ImportCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }
@@ -441,14 +444,6 @@ pub(crate) fn session_source_matches(session: &ImportSession, volume: &SourceVol
     } else {
         identity.fallback_fingerprint == volume.fingerprint
     }
-}
-
-#[tauri::command]
-pub(crate) fn get_import_session(
-    session_id: String,
-    service: tauri::State<'_, ImportService>,
-) -> Result<ImportSession, ImportCommandError> {
-    get_session(&service, &session_id)
 }
 
 #[tauri::command]

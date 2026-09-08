@@ -33,6 +33,7 @@ fn scan_plan_import_and_rescan_recognizes_the_whole_media_item() {
     let plan = build_import_plan(BuildImportPlanRequest {
         library_root: library.clone(),
         folder_template: "{year}/{date}-{event_name}".to_owned(),
+        file_name_template: "{original_name}".to_owned(),
         collision_policy: CollisionPolicy::Ask,
         events: events
             .into_iter()

@@ -8,7 +8,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use importer_domain::settings::SourceIdentity;
 use importer_manifest::{FileCandidate, ImportManifest, ManifestError, RecognitionProgress};
 use importer_media::{
-    ScanError, ScanProgress, SourceDiscovery, SystemSourceDiscovery, group_into_events,
+    MediaItem, ScanError, ScanProgress, SourceDiscovery, SystemSourceDiscovery, group_into_events,
     scan_media_parallel_with_progress,
 };
 use serde::Serialize;
@@ -81,11 +81,20 @@ struct ScanJobTimings {
     grouping_events_ms: u64,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct StreamedScanItems {
+    scan_id: String,
+    path: PathBuf,
+    items: Vec<MediaItem>,
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ScanJobCommandError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    technical_details: String,
 }
 
 impl ScanService {
@@ -113,10 +122,6 @@ impl MediaScanJob {
 
     pub(crate) fn imported_candidate_count(&self) -> Option<usize> {
         self.result.as_ref().map(|result| result.scan.items.len())
-    }
-
-    pub(crate) fn error_message(&self) -> Option<&str> {
-        self.error.as_deref()
     }
 }
 
@@ -296,11 +301,7 @@ pub(crate) fn start_media_scan_internal(
                     if workflow.state == SourceWorkflowState::PlanReady {
                         let file_count = workflow.plan.as_ref().map_or(0, |plan| plan.file_count);
                         let _ = app.emit("plan-ready", workflow);
-                        crate::background::announce_plan_ready_for_source(
-                            &app,
-                            &path,
-                            &format!("Plan obejmuje {file_count} plików i czeka na zatwierdzenie."),
-                        );
+                        crate::background::announce_plan_ready_for_source(&app, &path, file_count);
                     } else if workflow.state == SourceWorkflowState::AwaitingProfileConfirmation {
                         let _ = app.emit("source-profile-confirmation-required", workflow.clone());
                         crate::background::announce_profile_confirmation_required(&app, &path);
@@ -341,22 +342,6 @@ pub(crate) fn start_media_scan_internal(
 }
 
 #[tauri::command]
-pub(crate) fn get_media_scan(
-    scan_id: String,
-    service: tauri::State<'_, ScanService>,
-) -> Result<MediaScanJob, ScanJobCommandError> {
-    service
-        .jobs
-        .lock()
-        .map_err(|_| {
-            ScanJobCommandError::new("scanStateUnavailable", "Stan skanowania jest niedostępny.")
-        })?
-        .get(&scan_id)
-        .map(|job| job.public.clone())
-        .ok_or_else(|| ScanJobCommandError::new("scanNotFound", "Skan nie istnieje."))
-}
-
-#[tauri::command]
 pub(crate) fn list_media_scans(
     service: tauri::State<'_, ScanService>,
 ) -> Result<Vec<MediaScanJob>, ScanJobCommandError> {
@@ -390,9 +375,11 @@ pub(crate) fn cancel_media_scan(
 
 impl ScanJobCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }
@@ -402,6 +389,18 @@ fn emit_progress(service: &ScanService, app: &tauri::AppHandle, id: &str, progre
         importer_media::ScanProgressPhase::Discovering => MediaScanJobPhase::Discovering,
         importer_media::ScanProgressPhase::ReadingMetadata => MediaScanJobPhase::ReadingMetadata,
     };
+    if !progress.updated_items.is_empty()
+        && let Some(job) = service.get(id)
+    {
+        let _ = app.emit(
+            "scan-items",
+            StreamedScanItems {
+                scan_id: id.to_owned(),
+                path: job.path,
+                items: progress.updated_items.clone(),
+            },
+        );
+    }
     if let Some(job) = service.update(id, |job| {
         job.phase = phase;
         job.discovered_file_count = progress.discovered_file_count;

@@ -1,0 +1,257 @@
+{
+  "brand": { "tagline": "Obsługa zdjęć" },
+  "common": {
+    "retry": "Spróbuj ponownie",
+    "choose": "Wybierz",
+    "clear": "Wyczyść",
+    "remove": "Usuń",
+    "ready": "Gotowy"
+  },
+  "app": {
+    "navigationLabel": "Główna nawigacja",
+    "navigation": {
+      "import": "Import",
+      "backup": "Backup",
+      "activity": "Aktywność",
+      "settings": "Ustawienia"
+    },
+    "views": {
+      "home": {
+        "eyebrow": "PRZESTRZEŃ ROBOCZA",
+        "title": "Import",
+        "description": "Wybierz źródło i przygotuj zdjęcia do biblioteki."
+      },
+      "backup": {
+        "eyebrow": "OCHRONA BIBLIOTEKI",
+        "title": "Backup",
+        "description": "Kontroluj kopie i bezpieczeństwo kolekcji."
+      },
+      "activity": {
+        "eyebrow": "CENTRUM OPERACJI",
+        "title": "Aktywność",
+        "description": "Monitor, ostatnie zdarzenia i stan aplikacji."
+      },
+      "settings": {
+        "eyebrow": "KONFIGURACJA",
+        "title": "Ustawienia",
+        "description": "Dostosuj import, profile aparatów i automatyzację."
+      }
+    },
+    "systemStatus": "Stan systemu",
+    "reconnect": "Połącz ponownie",
+    "diagnostics": {
+      "eyebrow": "INFORMACJE TECHNICZNE",
+      "title": "System",
+      "description": "Pomocne podczas rozwiązywania problemów",
+      "label": "Diagnostyka aplikacji",
+      "product": "Produkt",
+      "version": "Wersja",
+      "system": "System",
+      "importEngine": "Silnik importu"
+    }
+  },
+  "status": {
+    "connecting": "Łączenie…",
+    "ready": "Gotowa",
+    "degraded": "Ograniczone działanie",
+    "error": "Brak połączenia"
+  },
+  "errors": {
+    "backend": {
+      "title": "Brak połączenia z backendem",
+      "impact": "Monitor nośników i skanowanie są teraz niedostępne.",
+      "action": "Sprawdź, czy aplikacja uruchomiła się poprawnie, i ponów połączenie."
+    },
+    "permission": {
+      "title": "Brak uprawnień",
+      "impact": "Aplikacja nie może odczytać wybranego nośnika lub katalogu.",
+      "action": "Nadaj dostęp do lokalizacji albo wybierz inny katalog i spróbuj ponownie."
+    },
+    "corruptSettings": {
+      "title": "Uszkodzone ustawienia",
+      "impact": "Nie można bezpiecznie wczytać konfiguracji aplikacji.",
+      "action": "Przywróć kopię ustawień lub ponów odczyt po poprawieniu pliku."
+    },
+    "read": {
+      "title": "Nie udało się odczytać źródeł",
+      "impact": "Liczba dostępnych źródeł jest nieznana; skanowanie ręczne nadal może być dostępne.",
+      "action": "Sprawdź podłączenie nośnika i spróbuj ponownie."
+    },
+    "settings": {
+      "title": "Nie udało się wczytać ustawień",
+      "impact": "Opcje importu nie są dostępne.",
+      "action": "Spróbuj ponownie lub przywróć kopię ustawień, jeśli jest dostępna."
+    },
+    "unknown": {
+      "title": "Nieznany błąd",
+      "impact": "Nie udało się zakończyć operacji.",
+      "action": "Spróbuj ponownie. Jeśli problem wróci, skopiuj szczegóły techniczne."
+    },
+    "noDetails": "Brak dodatkowych informacji."
+  },
+  "errorNotice": {
+    "technicalDetails": "Szczegóły techniczne",
+    "copied": "Skopiowano",
+    "copyDetails": "Kopiuj szczegóły"
+  },
+  "commandErrors": {
+    "sourceUnavailable": "Wybrane źródło jest niedostępne.",
+    "scanFailed": "Nie udało się zakończyć operacji skanowania.",
+    "importFailed": "Nie udało się zakończyć operacji importu.",
+    "workflowFailed": "Nie udało się odczytać lub zaktualizować zapisanego procesu importu.",
+    "metadataFailed": "Nie udało się odczytać lub zapisać metadanych zdjęć.",
+    "thumbnailFailed": "Nie udało się zakończyć operacji miniatury.",
+    "stateUnavailable": "Stan operacji jest chwilowo niedostępny.",
+    "notFound": "Żądana operacja już nie istnieje.",
+    "settingsUnavailable": "Ustawienia aplikacji są niedostępne.",
+    "backupFailed": "Nie udało się zakończyć operacji backupu.",
+    "invalidTargetPath": "Wybrany dysk backupu nie jest dostępny.",
+    "invalidSourcePath": "Katalog biblioteki nie jest dostępny. Sprawdź go w ustawieniach.",
+    "overlappingBackupRoots": "Biblioteka i cel backupu nie mogą znajdować się wewnątrz siebie.",
+    "wrongBackupTarget": "Pod wskazaną ścieżką znajduje się inny dysk. Podłącz właściwy cel backupu.",
+    "invalidTargetMarker": "Nie można odczytać identyfikatora dysku backupu. Nie zapisano żadnych plików.",
+    "backupSourceChanged": "Plik źródłowy zmienił się podczas backupu. Przygotuj nowy plan i spróbuj ponownie.",
+    "backupVerificationFailed": "Skopiowany plik nie przeszedł weryfikacji. Oryginalny plik pozostał bez zmian.",
+    "backupIoFailed": "Nie udało się odczytać lub zapisać pliku. Sprawdź podłączenie dysku i wolne miejsce.",
+    "openBackupDirectoryFailed": "Nie udało się otworzyć katalogu kopii.",
+    "unknown": "Nie udało się zakończyć operacji."
+  },
+  "settings": {
+    "language": {
+      "label": "Język",
+      "description": "Wybierz język używany przez aplikację."
+    },
+    "notices": {
+      "loadedDefaults": "Wczytano bezpieczne ustawienia domyślne. Zapis utworzy plik użytkownika.",
+      "loadedUser": "Wczytano ustawienia użytkownika.",
+      "saved": "Ustawienia zostały bezpiecznie zapisane.",
+      "restored": "Przywrócono poprzednią wersję ustawień.",
+      "exported": "Wyeksportowano przenośne ustawienia.",
+      "imported": "Zaimportowano i zapisano przenośne ustawienia.",
+      "cacheCleared": "Cache miniaturek został wyczyszczony. Podglądy zostaną wygenerowane ponownie."
+    },
+    "errors": {
+      "unknown": "Wystąpił nieznany błąd ustawień.",
+      "corruptedPrimary": "Plik ustawień jest uszkodzony.",
+      "backupNotFound": "Nie znaleziono poprawnej kopii ustawień.",
+      "invalidBackup": "Kopia ustawień jest uszkodzona.",
+      "validationFailed": "Nie można zapisać ustawień, ponieważ są nieprawidłowe.",
+      "settingsIoFailed": "Nie można odczytać lub zapisać pliku ustawień.",
+      "serializeFailed": "Nie można utworzyć eksportu ustawień.",
+      "importReadFailed": "Nie można odczytać wybranego pliku ustawień.",
+      "invalidImport": "Wybrany plik nie jest poprawnym eksportem ustawień.",
+      "invalidImportFormat": "Plik pochodzi z innej aplikacji lub ma nieobsługiwany format.",
+      "unsupportedImportVersion": "Ta wersja eksportu ustawień nie jest obsługiwana.",
+      "exportWriteFailed": "Nie można zapisać eksportu ustawień."
+    },
+    "loading": "Wczytywanie ustawień…",
+    "loadFailed": "Nie można wczytać ustawień.",
+    "restoreBackup": "Przywróć kopię",
+    "corruptFilePreserved": "Uszkodzony plik pozostawiono bez zmian, aby nie utracić danych.",
+    "heading": {
+      "eyebrow": "KONFIGURACJA",
+      "title": "Ustawienia importu",
+      "description": "Ustawienia lokalne zostają na tym komputerze. Profile i reguły można eksportować.",
+      "dirty": "Niezapisane zmiany",
+      "saved": "Zapisano"
+    },
+    "library": {
+      "title": "Biblioteka",
+      "description": "Lokalne położenie zdjęć na tym komputerze.",
+      "path": "Główny katalog biblioteki",
+      "placeholder": "Nie wybrano katalogu",
+      "dialogTitle": "Wybierz główny katalog biblioteki"
+    },
+    "import": {
+      "title": "Import",
+      "description": "Domyślne zachowanie po wykryciu znanego nośnika.",
+      "operation": "Operacja na plikach",
+      "copy": "Kopiuj (zalecane)",
+      "move": "Przenieś po weryfikacji",
+      "knownCard": "Po podłączeniu znanej karty",
+      "eventGap": "Nowe wydarzenie po przerwie",
+      "minutes": "minut"
+    },
+    "sourceBehavior": {
+      "ask": "Pokaż powiadomienie i zapytaj",
+      "autoPreparePlan": "Przygotuj plan automatycznie",
+      "ignore": "Ignoruj"
+    },
+    "naming": {
+      "title": "Nazewnictwo",
+      "description": "Foldery wydarzeń przechodzących przez północ nadal użyją daty początku wydarzenia.",
+      "folderTemplate": "Szablon folderu",
+      "folderHelp": "Dostępne: {year}, {month}, {day}, {date}, {event_name}, {camera_alias}",
+      "fileTemplate": "Szablon nazwy pliku",
+      "fileHelp": "Dostępne: {date}, {year}, {month}, {day}, {event_name}, {camera_make}, {camera_model}, {camera_alias}, {source_alias}, {original_name} i licznik, np. {counter:04}. Rozszerzenie zostanie zachowane.",
+      "collision": "Konflikt nazwy",
+      "collisionAsk": "Zatrzymaj i zapytaj",
+      "collisionSequence": "Dodaj kolejny numer"
+    },
+    "profiles": {
+      "title": "Profile aparatów",
+      "description": "EXIF pomoże rozpoznać aparat niezależnie od użytej karty.",
+      "empty": "Brak profili. Możesz dodać pierwszy aparat ręcznie.",
+      "defaultName": "Aparat {{number}}",
+      "add": "+ Dodaj profil aparatu",
+      "name": "Nazwa profilu",
+      "remove": "Usuń profil",
+      "make": "Producent EXIF",
+      "model": "Model EXIF",
+      "serial": "Numer seryjny EXIF",
+      "timeOffset": "Domyślna korekta czasu (sekundy)",
+      "unknownCamera": "Nieznany aparat"
+    },
+    "bindings": {
+      "title": "Powiązane nośniki",
+      "description": "Powiązania powstaną podczas rozpoznawania kart; można je tutaj usunąć.",
+      "empty": "Nie zapamiętano jeszcze żadnego nośnika."
+    },
+    "behavior": {
+      "title": "Zachowanie aplikacji",
+      "description": "Ustawienia specyficzne dla bieżącego użytkownika i komputera.",
+      "startAtLogin": "Uruchamiaj przy logowaniu",
+      "minimizeToTray": "Minimalizuj do zasobnika systemowego",
+      "showWhenPlanReady": "Pokaż okno, gdy plan importu jest gotowy",
+      "notifications": "Powiadomienia systemowe",
+      "afterRestart": "Po restarcie aplikacji",
+      "resumeAsk": "Zapytaj przed wznowieniem",
+      "resumeAutomatic": "Wznów automatycznie",
+      "concurrency": "Równoległe importy"
+    },
+    "thumbnails": {
+      "title": "Miniatury",
+      "description": "Lokalny cache znajduje się w systemowym katalogu cache aplikacji i nie zmienia biblioteki zdjęć.",
+      "clear": "Wyczyść cache miniaturek"
+    },
+    "transfer": {
+      "title": "Przenoszenie ustawień",
+      "description": "Eksport nie zawiera ścieżek ani powiązań nośników tego komputera.",
+      "exportDialog": "Eksportuj ustawienia Photo Importer",
+      "importDialog": "Importuj ustawienia Photo Importer",
+      "saveFirst": "Najpierw zapisz zmiany",
+      "export": "Eksportuj JSON",
+      "import": "Importuj JSON",
+      "restorePrevious": "Przywróć poprzednią wersję"
+    },
+    "actions": {
+      "discard": "Odrzuć zmiany",
+      "saving": "Zapisywanie…",
+      "save": "Zapisz ustawienia"
+    },
+    "validation": {
+      "eventGap": "Przerwa między wydarzeniami musi wynosić od 1 do 10080 minut.",
+      "folderPrefix": "Szablon folderu: {{detail}}",
+      "filePrefix": "Szablon nazwy pliku: {{detail}}",
+      "concurrency": "Liczba równoległych importów musi wynosić od 1 do 8.",
+      "profileName": "Każdy profil aparatu musi mieć nazwę.",
+      "empty": "nie może być pusty.",
+      "pathSeparator": "nie może zawierać separatora katalogów.",
+      "relativePath": "musi być ścieżką względną.",
+      "dotSegments": "nie może zawierać segmentów . ani ...",
+      "invalidBraces": "ma nieprawidłowe nawiasy klamrowe.",
+      "unclosedBrace": "ma niezamknięty nawias klamrowy.",
+      "unknownVariable": "zawiera nieznaną zmienną {{variable}}."
+    }
+  }
+}

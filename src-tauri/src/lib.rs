@@ -6,6 +6,7 @@ use importer_manifest::ImportManifest;
 mod background;
 mod backups;
 mod imports;
+mod localization;
 mod scan_jobs;
 mod settings;
 mod sources;
@@ -16,18 +17,16 @@ use background::{
     ignore_source_until_disconnect, refresh_background_monitor, start_source_workflow,
 };
 use backups::{
-    BackupService, cancel_backup_job, get_backup_job, inspect_backup, list_backup_history,
-    list_backup_jobs, list_backup_targets, open_backup_directory, pause_backup_job,
-    prepare_backup_plan, recognize_backup_target, register_backup_target, remove_backup_target,
-    resume_backup_job, start_backup_job,
+    BackupService, cancel_backup_job, cancel_backup_planning_job, get_backup_job, inspect_backup,
+    list_backup_history, list_backup_jobs, list_backup_planning_jobs, list_backup_targets,
+    open_backup_directory, pause_backup_job, recognize_backup_target, register_backup_target,
+    remove_backup_target, resume_backup_job, start_backup_job, start_backup_planning_job,
 };
 use imports::{
-    ImportService, cancel_import_session, create_import_session, get_import_session,
-    list_import_sessions, pause_import_session, retry_import_rollback, start_import_session,
+    ImportService, cancel_import_session, create_import_session, list_import_sessions,
+    pause_import_session, retry_import_rollback, start_import_session,
 };
-use scan_jobs::{
-    ScanService, cancel_media_scan, get_media_scan, list_media_scans, start_media_scan,
-};
+use scan_jobs::{ScanService, cancel_media_scan, list_media_scans, start_media_scan};
 
 use settings::{
     SettingsService, export_portable_settings, import_portable_settings, load_settings,
@@ -36,9 +35,12 @@ use settings::{
 use sources::{
     announce_import_plan_ready, build_import_plan_preview, correct_capture_times,
     delete_pending_source_workflow, ensure_media_source_marker, list_media_sources,
-    list_pending_source_workflows, list_source_workflows, save_pending_source_workflow,
+    list_pending_source_workflows, list_photo_user_metadata, list_source_workflows,
+    save_pending_source_workflow, save_photo_user_metadata,
 };
-use thumbnails::{ThumbnailService, clear_thumbnail_cache, get_media_thumbnail};
+use thumbnails::{
+    ThumbnailService, allow_original_jpeg_preview, clear_thumbnail_cache, get_media_thumbnail,
+};
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -123,19 +125,20 @@ pub fn run() {
             list_pending_source_workflows,
             delete_pending_source_workflow,
             correct_capture_times,
+            list_photo_user_metadata,
+            save_photo_user_metadata,
             build_import_plan_preview,
             create_import_session,
             start_import_session,
             pause_import_session,
             cancel_import_session,
             retry_import_rollback,
-            get_import_session,
             list_import_sessions,
             start_media_scan,
-            get_media_scan,
             list_media_scans,
             cancel_media_scan,
             get_media_thumbnail,
+            allow_original_jpeg_preview,
             clear_thumbnail_cache,
             get_background_status,
             refresh_background_monitor,
@@ -147,7 +150,9 @@ pub fn run() {
             list_backup_targets,
             recognize_backup_target,
             remove_backup_target,
-            prepare_backup_plan,
+            start_backup_planning_job,
+            list_backup_planning_jobs,
+            cancel_backup_planning_job,
             inspect_backup,
             list_backup_history,
             open_backup_directory,

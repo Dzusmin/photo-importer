@@ -11,7 +11,3 @@ export interface SystemStatus {
 export function getSystemStatus(): Promise<SystemStatus | null> {
   return invoke<SystemStatus>("get_system_status");
 }
-
-export function describeSystem(status: SystemStatus): string {
-  return `${status.operatingSystem} / ${status.architecture}`;
-}

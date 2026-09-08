@@ -24,6 +24,7 @@ const REGISTRY_FILE: &str = "backup-targets.sqlite3";
 pub(crate) struct BackupService {
     registry: TargetRegistry,
     jobs: Arc<Mutex<HashMap<String, InternalBackupJob>>>,
+    planning_jobs: Arc<Mutex<HashMap<String, InternalPlanningJob>>>,
 }
 
 #[derive(Debug)]
@@ -31,6 +32,12 @@ struct InternalBackupJob {
     public: BackupJob,
     cancel: Arc<AtomicBool>,
     pause: Arc<AtomicBool>,
+}
+
+#[derive(Debug)]
+struct InternalPlanningJob {
+    public: BackupPlanningJob,
+    cancel: Arc<AtomicBool>,
 }
 
 type StartedBackupJob = (
@@ -41,11 +48,27 @@ type StartedBackupJob = (
     bool,
 );
 
+type StartedPlanningJob = (
+    BackupPlanningJob,
+    importer_backup::BackupEngine,
+    Arc<AtomicBool>,
+    bool,
+);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) enum BackupJobStatus {
     Running,
     Paused,
+    Completed,
+    Failed,
+    Cancelled,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) enum BackupPlanningJobStatus {
+    Running,
     Completed,
     Failed,
     Cancelled,
@@ -72,11 +95,33 @@ pub(crate) struct BackupJob {
     report: Option<BackupReport>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct BackupPlanningJob {
+    id: String,
+    target_id: Uuid,
+    source_path: PathBuf,
+    target_path: PathBuf,
+    status: BackupPlanningJobStatus,
+    phase: BackupPhase,
+    processed_file_count: usize,
+    total_file_count: Option<usize>,
+    processed_bytes: u64,
+    total_bytes: Option<u64>,
+    current_path: Option<PathBuf>,
+    cancel_requested: bool,
+    started_at_unix_ms: u64,
+    updated_at_unix_ms: u64,
+    error: Option<String>,
+    plan: Option<BackupPlan>,
+}
+
 #[derive(Debug, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupCommandError {
     pub(crate) code: &'static str,
     pub(crate) message: String,
+    technical_details: String,
 }
 
 impl BackupService {
@@ -84,6 +129,7 @@ impl BackupService {
         Ok(Self {
             registry: TargetRegistry::open(data_directory.into().join(REGISTRY_FILE))?,
             jobs: Arc::new(Mutex::new(HashMap::new())),
+            planning_jobs: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -152,17 +198,109 @@ impl BackupService {
         Ok(())
     }
 
-    fn prepare_plan(
+    fn begin_planning_job(
         &self,
         target_id: &str,
         target_path: PathBuf,
         source_path: PathBuf,
-    ) -> Result<BackupPlan, BackupCommandError> {
+    ) -> Result<StartedPlanningJob, BackupCommandError> {
         let target_id = parse_target_id(target_id)?;
-        self.registry
-            .connect(target_id, target_path)
-            .and_then(|engine| engine.plan(source_path))
-            .map_err(BackupCommandError::from)
+        let engine = self
+            .registry
+            .connect(target_id, target_path.clone())
+            .map_err(BackupCommandError::from)?;
+        if !source_path.is_dir() {
+            return Err(BackupCommandError::from(BackupError::InvalidSourceRoot(
+                source_path,
+            )));
+        }
+        let mut jobs = self.planning_jobs.lock().map_err(|_| {
+            BackupCommandError::new("backupStateUnavailable", "Stan backupu jest niedostępny.")
+        })?;
+        if let Some(existing) = jobs.values().find(|job| {
+            job.public.target_id == target_id
+                && job.public.status == BackupPlanningJobStatus::Running
+        }) {
+            return Ok((
+                existing.public.clone(),
+                engine,
+                Arc::clone(&existing.cancel),
+                false,
+            ));
+        }
+        let id = Uuid::new_v4().to_string();
+        let now = now_unix_ms();
+        let public = BackupPlanningJob {
+            id: id.clone(),
+            target_id,
+            source_path,
+            target_path,
+            status: BackupPlanningJobStatus::Running,
+            phase: BackupPhase::ScanningLibrary,
+            processed_file_count: 0,
+            total_file_count: None,
+            processed_bytes: 0,
+            total_bytes: None,
+            current_path: None,
+            cancel_requested: false,
+            started_at_unix_ms: now,
+            updated_at_unix_ms: now,
+            error: None,
+            plan: None,
+        };
+        let cancel = Arc::new(AtomicBool::new(false));
+        jobs.insert(
+            id,
+            InternalPlanningJob {
+                public: public.clone(),
+                cancel: Arc::clone(&cancel),
+            },
+        );
+        Ok((public, engine, cancel, true))
+    }
+
+    fn update_planning_job(
+        &self,
+        id: &str,
+        update: impl FnOnce(&mut BackupPlanningJob),
+    ) -> Option<BackupPlanningJob> {
+        let mut jobs = self.planning_jobs.lock().ok()?;
+        let job = &mut jobs.get_mut(id)?.public;
+        update(job);
+        job.updated_at_unix_ms = now_unix_ms();
+        Some(job.clone())
+    }
+
+    fn list_planning_jobs(&self) -> Result<Vec<BackupPlanningJob>, BackupCommandError> {
+        let mut jobs: Vec<_> = self
+            .planning_jobs
+            .lock()
+            .map_err(|_| {
+                BackupCommandError::new("backupStateUnavailable", "Stan backupu jest niedostępny.")
+            })?
+            .values()
+            .map(|job| job.public.clone())
+            .collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at_unix_ms));
+        Ok(jobs)
+    }
+
+    fn cancel_planning_job(&self, id: &str) -> Result<BackupPlanningJob, BackupCommandError> {
+        let mut jobs = self.planning_jobs.lock().map_err(|_| {
+            BackupCommandError::new("backupStateUnavailable", "Stan backupu jest niedostępny.")
+        })?;
+        let job = jobs.get_mut(id).ok_or_else(|| {
+            BackupCommandError::new(
+                "backupPlanningJobNotFound",
+                "Zadanie planowania nie istnieje.",
+            )
+        })?;
+        if job.public.status == BackupPlanningJobStatus::Running {
+            job.cancel.store(true, Ordering::Relaxed);
+            job.public.cancel_requested = true;
+            job.public.updated_at_unix_ms = now_unix_ms();
+        }
+        Ok(job.public.clone())
     }
 
     fn inspect(
@@ -354,9 +492,11 @@ enum BackupControlAction {
 
 impl BackupCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }
@@ -445,18 +585,57 @@ pub(crate) fn remove_backup_target(
 }
 
 #[tauri::command]
-pub(crate) async fn prepare_backup_plan(
+pub(crate) fn start_backup_planning_job(
     target_id: String,
     target_path: PathBuf,
     source_path: PathBuf,
+    app: tauri::AppHandle,
     service: tauri::State<'_, BackupService>,
-) -> Result<BackupPlan, BackupCommandError> {
-    let service = service.inner().clone();
+) -> Result<BackupPlanningJob, BackupCommandError> {
+    let (job, engine, cancel, is_new) =
+        service.begin_planning_job(&target_id, target_path, source_path)?;
+    if !is_new {
+        return Ok(job);
+    }
+    let job_id = job.id.clone();
+    let source_path = job.source_path.clone();
+    let worker_service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        service.prepare_plan(&target_id, target_path, source_path)
-    })
-    .await
-    .map_err(|error| BackupCommandError::new("backupTaskFailed", error.to_string()))?
+        let result = engine.plan_with_progress(
+            source_path,
+            |progress| emit_planning_progress(&worker_service, &app, &job_id, progress),
+            || cancel.load(Ordering::Relaxed),
+        );
+        match result {
+            Ok(plan) => {
+                if let Some(job) = worker_service.update_planning_job(&job_id, |job| {
+                    job.status = BackupPlanningJobStatus::Completed;
+                    job.current_path = None;
+                    job.cancel_requested = false;
+                    job.plan = Some(plan);
+                }) {
+                    let _ = app.emit("backup-planning-progress", job);
+                }
+            }
+            Err(error) => finish_planning_error(&worker_service, &app, &job_id, error),
+        }
+    });
+    Ok(job)
+}
+
+#[tauri::command]
+pub(crate) fn list_backup_planning_jobs(
+    service: tauri::State<'_, BackupService>,
+) -> Result<Vec<BackupPlanningJob>, BackupCommandError> {
+    service.list_planning_jobs()
+}
+
+#[tauri::command]
+pub(crate) fn cancel_backup_planning_job(
+    job_id: String,
+    service: tauri::State<'_, BackupService>,
+) -> Result<BackupPlanningJob, BackupCommandError> {
+    service.cancel_planning_job(&job_id)
 }
 
 #[tauri::command]
@@ -641,6 +820,44 @@ fn emit_job_progress(
     }
 }
 
+fn emit_planning_progress(
+    service: &BackupService,
+    app: &tauri::AppHandle,
+    id: &str,
+    progress: BackupProgress,
+) {
+    if let Some(job) = service.update_planning_job(id, |job| {
+        job.phase = progress.phase;
+        job.processed_file_count = progress.processed_file_count;
+        job.total_file_count = progress.total_file_count;
+        job.processed_bytes = progress.processed_bytes;
+        job.total_bytes = progress.total_bytes;
+        job.current_path = progress.current_path;
+    }) {
+        let _ = app.emit("backup-planning-progress", job);
+    }
+}
+
+fn finish_planning_error(
+    service: &BackupService,
+    app: &tauri::AppHandle,
+    id: &str,
+    error: BackupError,
+) {
+    if let Some(job) = service.update_planning_job(id, |job| {
+        job.status = if matches!(&error, BackupError::Cancelled) {
+            BackupPlanningJobStatus::Cancelled
+        } else {
+            BackupPlanningJobStatus::Failed
+        };
+        job.cancel_requested = false;
+        job.current_path = None;
+        job.error = (!matches!(&error, BackupError::Cancelled)).then(|| error.to_string());
+    }) {
+        let _ = app.emit("backup-planning-progress", job);
+    }
+}
+
 fn finish_job_error(service: &BackupService, app: &tauri::AppHandle, id: &str, error: BackupError) {
     if let Some(job) = service.update_job(id, |job| {
         job.status = if matches!(&error, BackupError::Cancelled) {
@@ -732,7 +949,7 @@ mod tests {
             .register(disk, "Archiwum".to_owned(), &AppSettings::default(), &[])
             .unwrap();
         let error = service
-            .prepare_plan(
+            .begin_planning_job(
                 &registered.id.to_string(),
                 other,
                 directory.path().to_path_buf(),
@@ -778,12 +995,47 @@ mod tests {
             )
             .unwrap();
 
-        let plan = service
-            .prepare_plan(&registered.id.to_string(), disk, source)
+        let (job, engine, _, is_new) = service
+            .begin_planning_job(&registered.id.to_string(), disk, source.clone())
             .unwrap();
+        let plan = engine.plan(source).unwrap();
 
+        assert!(is_new);
+        assert_eq!(job.status, BackupPlanningJobStatus::Running);
         assert_eq!(plan.target_id, registered.id);
         assert_eq!(plan.operations.len(), 1);
+    }
+
+    #[test]
+    fn planning_reuses_an_active_job_for_the_same_target_and_can_cancel_it() {
+        let (directory, service) = service();
+        let disk = directory.path().join("disk");
+        let source = directory.path().join("library");
+        fs::create_dir(&disk).unwrap();
+        fs::create_dir(&source).unwrap();
+        let registered = service
+            .register(
+                disk.clone(),
+                "Archiwum".to_owned(),
+                &AppSettings::default(),
+                &[],
+            )
+            .unwrap();
+
+        let (first, _, first_cancel, is_new) = service
+            .begin_planning_job(&registered.id.to_string(), disk.clone(), source.clone())
+            .unwrap();
+        let (second, _, second_cancel, is_new_again) = service
+            .begin_planning_job(&registered.id.to_string(), disk, source)
+            .unwrap();
+
+        assert!(is_new);
+        assert!(!is_new_again);
+        assert_eq!(first.id, second.id);
+        assert!(Arc::ptr_eq(&first_cancel, &second_cancel));
+        let cancelled = service.cancel_planning_job(&first.id).unwrap();
+        assert!(cancelled.cancel_requested);
+        assert!(first_cancel.load(Ordering::Relaxed));
     }
 
     #[test]

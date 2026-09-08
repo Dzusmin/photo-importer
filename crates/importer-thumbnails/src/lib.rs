@@ -19,7 +19,7 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 use thiserror::Error;
 
-const CACHE_VERSION: u32 = 2;
+const CACHE_VERSION: u32 = 3;
 const DEFAULT_MAX_BYTES: u64 = 5 * 1024 * 1024 * 1024;
 const JPEG_QUALITY: u8 = 84;
 const LRU_WRITE_INTERVAL_MS: u64 = 60_000;
@@ -397,11 +397,20 @@ fn source_identity(source: &Path) -> Result<(u64, u64), ThumbnailError> {
 fn decode_preview(source: &Path, max_dimension: u32) -> Result<DynamicImage, ThumbnailError> {
     if is_raw(source) {
         let parameters = RawDecodeParams::default();
-        if let Ok(thumbnail) = extract_thumbnail_pixels(source, &parameters) {
-            return Ok(thumbnail);
-        }
-        if let Ok(preview) = extract_preview_pixels(source, &parameters) {
-            return Ok(preview);
+        if max_dimension > 320 {
+            if let Ok(preview) = extract_preview_pixels(source, &parameters) {
+                return Ok(preview);
+            }
+            if let Ok(thumbnail) = extract_thumbnail_pixels(source, &parameters) {
+                return Ok(thumbnail);
+            }
+        } else {
+            if let Ok(thumbnail) = extract_thumbnail_pixels(source, &parameters) {
+                return Ok(thumbnail);
+            }
+            if let Ok(preview) = extract_preview_pixels(source, &parameters) {
+                return Ok(preview);
+            }
         }
         return embedded_jpeg(source).ok_or_else(|| ThumbnailError::Decode {
             path: source.to_path_buf(),
@@ -412,6 +421,9 @@ fn decode_preview(source: &Path, max_dimension: u32) -> Result<DynamicImage, Thu
         });
     }
     if is_jpeg(source) {
+        if let Some(thumbnail) = embedded_exif_thumbnail(source) {
+            return Ok(thumbnail);
+        }
         return decode_scaled_jpeg(source, max_dimension);
     }
     let reader =
@@ -432,6 +444,138 @@ fn decode_preview(source: &Path, max_dimension: u32) -> Result<DynamicImage, Thu
             path: source.to_path_buf(),
             source: source_error,
         })
+}
+
+/// Reads the JPEG stored in TIFF IFD1 inside an Exif APP1 segment. Cameras
+/// normally place this small preview near the start of the file, so the grid
+/// does not have to read and decode the full-resolution JPEG.
+fn embedded_exif_thumbnail(source: &Path) -> Option<DynamicImage> {
+    const MAX_JPEG_HEADER_BYTES: u64 = 2 * 1024 * 1024;
+    let file = fs::File::open(source).ok()?;
+    let tiff = read_jpeg_exif_tiff(BufReader::new(file), MAX_JPEG_HEADER_BYTES)?;
+    let (offset, length) = exif_thumbnail_range(&tiff)?;
+    let jpeg = tiff.get(offset..offset.checked_add(length)?)?;
+    let mut thumbnail = image::load_from_memory_with_format(jpeg, image::ImageFormat::Jpeg).ok()?;
+    if let Some(orientation) = exif_orientation(&tiff).and_then(Orientation::from_exif) {
+        thumbnail.apply_orientation(orientation);
+    }
+    Some(thumbnail)
+}
+
+fn read_jpeg_exif_tiff(mut reader: impl Read, maximum_bytes: u64) -> Option<Vec<u8>> {
+    let mut signature = [0_u8; 2];
+    reader.read_exact(&mut signature).ok()?;
+    if signature != [0xff, 0xd8] {
+        return None;
+    }
+    let mut consumed = 2_u64;
+    loop {
+        let mut byte = [0_u8; 1];
+        while byte[0] != 0xff {
+            reader.read_exact(&mut byte).ok()?;
+            consumed = consumed.checked_add(1)?;
+            if consumed > maximum_bytes {
+                return None;
+            }
+        }
+        while byte[0] == 0xff {
+            reader.read_exact(&mut byte).ok()?;
+            consumed = consumed.checked_add(1)?;
+        }
+        let marker = byte[0];
+        if matches!(marker, 0xd9 | 0xda) {
+            break;
+        }
+        if matches!(marker, 0x01 | 0xd0..=0xd7) {
+            continue;
+        }
+        let mut length_bytes = [0_u8; 2];
+        reader.read_exact(&mut length_bytes).ok()?;
+        consumed = consumed.checked_add(2)?;
+        let length = usize::from(u16::from_be_bytes(length_bytes));
+        if length < 2 {
+            return None;
+        }
+        let mut segment = vec![0_u8; length - 2];
+        reader.read_exact(&mut segment).ok()?;
+        consumed = consumed.checked_add(u64::try_from(segment.len()).ok()?)?;
+        if consumed > maximum_bytes {
+            return None;
+        }
+        if marker == 0xe1 && segment.starts_with(b"Exif\0\0") {
+            return Some(segment.split_off(6));
+        }
+    }
+    None
+}
+
+fn exif_thumbnail_range(tiff: &[u8]) -> Option<(usize, usize)> {
+    let reader = TiffReader::new(tiff)?;
+    let ifd0 = usize::try_from(reader.u32(4)?).ok()?;
+    let entry_count = usize::from(reader.u16(ifd0)?);
+    let next_ifd_offset = ifd0.checked_add(2 + entry_count.checked_mul(12)?)?;
+    let ifd1 = usize::try_from(reader.u32(next_ifd_offset)?).ok()?;
+    if ifd1 == 0 {
+        return None;
+    }
+    let count = usize::from(reader.u16(ifd1)?);
+    let mut offset = None;
+    let mut length = None;
+    for index in 0..count {
+        let entry = ifd1.checked_add(2 + index.checked_mul(12)?)?;
+        match reader.u16(entry)? {
+            0x0201 => offset = usize::try_from(reader.u32(entry + 8)?).ok(),
+            0x0202 => length = usize::try_from(reader.u32(entry + 8)?).ok(),
+            _ => {}
+        }
+    }
+    Some((offset?, length?))
+}
+
+struct TiffReader<'a> {
+    bytes: &'a [u8],
+    little_endian: bool,
+}
+
+impl<'a> TiffReader<'a> {
+    fn new(bytes: &'a [u8]) -> Option<Self> {
+        let little_endian = match bytes.get(..2)? {
+            b"II" => true,
+            b"MM" => false,
+            _ => return None,
+        };
+        let reader = Self {
+            bytes,
+            little_endian,
+        };
+        (reader.u16(2)? == 42).then_some(reader)
+    }
+
+    fn u16(&self, offset: usize) -> Option<u16> {
+        let bytes: [u8; 2] = self
+            .bytes
+            .get(offset..offset.checked_add(2)?)?
+            .try_into()
+            .ok()?;
+        Some(if self.little_endian {
+            u16::from_le_bytes(bytes)
+        } else {
+            u16::from_be_bytes(bytes)
+        })
+    }
+
+    fn u32(&self, offset: usize) -> Option<u32> {
+        let bytes: [u8; 4] = self
+            .bytes
+            .get(offset..offset.checked_add(4)?)?
+            .try_into()
+            .ok()?;
+        Some(if self.little_endian {
+            u32::from_le_bytes(bytes)
+        } else {
+            u32::from_be_bytes(bytes)
+        })
+    }
 }
 
 fn decode_scaled_jpeg(source: &Path, max_dimension: u32) -> Result<DynamicImage, ThumbnailError> {
@@ -493,39 +637,13 @@ fn decode_scaled_jpeg(source: &Path, max_dimension: u32) -> Result<DynamicImage,
 }
 
 fn exif_orientation(exif: &[u8]) -> Option<u8> {
-    if exif.len() < 8 {
-        return None;
-    }
-    let little_endian = match &exif[..2] {
-        b"II" => true,
-        b"MM" => false,
-        _ => return None,
-    };
-    let read_u16 = |offset: usize| -> Option<u16> {
-        let bytes: [u8; 2] = exif.get(offset..offset + 2)?.try_into().ok()?;
-        Some(if little_endian {
-            u16::from_le_bytes(bytes)
-        } else {
-            u16::from_be_bytes(bytes)
-        })
-    };
-    let read_u32 = |offset: usize| -> Option<u32> {
-        let bytes: [u8; 4] = exif.get(offset..offset + 4)?.try_into().ok()?;
-        Some(if little_endian {
-            u32::from_le_bytes(bytes)
-        } else {
-            u32::from_be_bytes(bytes)
-        })
-    };
-    if read_u16(2)? != 42 {
-        return None;
-    }
-    let directory = usize::try_from(read_u32(4)?).ok()?;
-    let count = usize::from(read_u16(directory)?);
+    let reader = TiffReader::new(exif)?;
+    let directory = usize::try_from(reader.u32(4)?).ok()?;
+    let count = usize::from(reader.u16(directory)?);
     for index in 0..count {
         let entry = directory.checked_add(2 + index * 12)?;
-        if read_u16(entry)? == 0x0112 && read_u16(entry + 2)? == 3 {
-            return u8::try_from(read_u16(entry + 8)?).ok();
+        if reader.u16(entry)? == 0x0112 && reader.u16(entry + 2)? == 3 {
+            return u8::try_from(reader.u16(entry + 8)?).ok();
         }
     }
     None
@@ -803,17 +921,48 @@ mod tests {
     }
 
     #[test]
-    fn opening_v2_removes_only_stale_version_directories() {
+    fn reads_an_embedded_exif_jpeg_thumbnail() {
+        let directory = tempfile::tempdir().unwrap();
+        let source = directory.path().join("source.jpg");
+        let thumbnail =
+            DynamicImage::ImageRgb8(ImageBuffer::from_pixel(32, 20, Rgb([11_u8, 22, 33])));
+        let mut encoded = std::io::Cursor::new(Vec::new());
+        thumbnail
+            .write_to(&mut encoded, image::ImageFormat::Jpeg)
+            .unwrap();
+        let encoded = encoded.into_inner();
+
+        let mut tiff = vec![b'I', b'I', 42, 0, 8, 0, 0, 0, 0, 0, 14, 0, 0, 0, 2, 0];
+        tiff.extend_from_slice(&[1, 2, 4, 0, 1, 0, 0, 0, 44, 0, 0, 0]);
+        tiff.extend_from_slice(&[2, 2, 4, 0, 1, 0, 0, 0]);
+        tiff.extend_from_slice(&(encoded.len() as u32).to_le_bytes());
+        tiff.extend_from_slice(&[0, 0, 0, 0]);
+        tiff.extend_from_slice(&encoded);
+        let segment_length = u16::try_from(2 + 6 + tiff.len()).unwrap();
+        let mut jpeg = vec![0xff, 0xd8, 0xff, 0xe1];
+        jpeg.extend_from_slice(&segment_length.to_be_bytes());
+        jpeg.extend_from_slice(b"Exif\0\0");
+        jpeg.extend_from_slice(&tiff);
+        jpeg.extend_from_slice(&[0xff, 0xd9]);
+        fs::write(&source, jpeg).unwrap();
+
+        let decoded = embedded_exif_thumbnail(&source).unwrap();
+
+        assert_eq!(decoded.dimensions(), (32, 20));
+    }
+
+    #[test]
+    fn opening_v3_removes_only_stale_version_directories() {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path().join("cache").join("thumbnails");
-        fs::create_dir_all(root.join("v1")).unwrap();
+        fs::create_dir_all(root.join("v2")).unwrap();
         fs::create_dir_all(root.join("custom-data")).unwrap();
-        fs::write(root.join("v1").join("old.webp"), b"old").unwrap();
+        fs::write(root.join("v2").join("old.webp"), b"old").unwrap();
 
         let _cache = ThumbnailCache::open(directory.path().join("cache")).unwrap();
 
-        assert!(!root.join("v1").exists());
-        assert!(root.join("v2").is_dir());
+        assert!(!root.join("v2").exists());
+        assert!(root.join("v3").is_dir());
         assert!(root.join("custom-data").is_dir());
     }
 }

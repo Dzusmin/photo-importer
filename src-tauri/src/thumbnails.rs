@@ -4,6 +4,7 @@ use std::sync::{Arc, Condvar, Mutex, RwLock};
 
 use importer_thumbnails::{CachedThumbnail, ThumbnailCache, ThumbnailError};
 use serde::Serialize;
+use tauri::Manager;
 
 #[derive(Debug, Clone)]
 pub(crate) struct ThumbnailService {
@@ -41,6 +42,7 @@ struct ThumbnailTimingPayload {
 pub(crate) struct ThumbnailCommandError {
     code: &'static str,
     message: String,
+    technical_details: String,
 }
 
 #[derive(Debug)]
@@ -217,6 +219,32 @@ pub(crate) async fn get_media_thumbnail(
 }
 
 #[tauri::command]
+pub(crate) fn allow_original_jpeg_preview(
+    path: PathBuf,
+    app: tauri::AppHandle,
+) -> Result<PathBuf, ThumbnailCommandError> {
+    let is_jpeg = path
+        .extension()
+        .and_then(|extension| extension.to_str())
+        .is_some_and(|extension| matches!(extension.to_ascii_lowercase().as_str(), "jpg" | "jpeg"));
+    if !is_jpeg || !path.is_file() {
+        return Err(ThumbnailCommandError::new(
+            "originalPreviewUnsupported",
+            "Oryginalny podgląd jest dostępny tylko dla istniejących plików JPEG.",
+        ));
+    }
+    app.asset_protocol_scope()
+        .allow_file(&path)
+        .map_err(|error| {
+            ThumbnailCommandError::new(
+                "originalPreviewUnavailable",
+                format!("Nie można udostępnić oryginalnego JPEG-a: {error}"),
+            )
+        })?;
+    Ok(path)
+}
+
+#[tauri::command]
 pub(crate) async fn clear_thumbnail_cache(
     service: tauri::State<'_, ThumbnailService>,
 ) -> Result<(), ThumbnailCommandError> {
@@ -233,9 +261,11 @@ pub(crate) async fn clear_thumbnail_cache(
 
 impl ThumbnailCommandError {
     fn new(code: &'static str, message: impl Into<String>) -> Self {
+        let message = message.into();
         Self {
             code,
-            message: message.into(),
+            technical_details: message.clone(),
+            message,
         }
     }
 }

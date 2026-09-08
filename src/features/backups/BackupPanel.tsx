@@ -3,19 +3,22 @@ import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
   cancelBackupJob,
+  cancelBackupPlanningJob,
   inspectBackup,
   listBackupHistory,
   listBackupJobs,
+  listBackupPlanningJobs,
   listBackupTargets,
   normalizeBackupError,
   openBackupDirectory,
   pauseBackupJob,
-  prepareBackupPlan,
   recognizeBackupTarget,
   registerBackupTarget,
   resumeBackupJob,
   startBackupJob,
+  startBackupPlanningJob,
   type BackupJob,
+  type BackupPlanningJob,
   type BackupFileStatus,
   type BackupPhase,
   type BackupPlan,
@@ -41,8 +44,10 @@ export function BackupPanel() {
   const [libraryPath, setLibraryPath] = useState<string | null>(null);
   const [plan, setPlan] = useState<BackupPlan | null>(null);
   const [job, setJob] = useState<BackupJob | null>(null);
+  const [planningJob, setPlanningJob] = useState<BackupPlanningJob | null>(
+    null,
+  );
   const [loading, setLoading] = useState(true);
-  const [planning, setPlanning] = useState(false);
   const [controlling, setControlling] = useState(false);
   const [registering, setRegistering] = useState(false);
   const [registrationOpen, setRegistrationOpen] = useState(false);
@@ -80,10 +85,11 @@ export function BackupPanel() {
     void Promise.all([
       listBackupTargets(),
       listBackupJobs(),
+      listBackupPlanningJobs(),
       loadSettings(),
       listMediaSources(),
     ])
-      .then(async ([knownTargets, jobs, settings, discovered]) => {
+      .then(async ([knownTargets, jobs, planningJobs, settings, discovered]) => {
         const recognized = await Promise.all(
           discovered.map((volume) =>
             recognizeBackupTarget(volume.mountPath).catch(() => null),
@@ -102,15 +108,29 @@ export function BackupPanel() {
         );
         setTargets(refreshedTargets);
         setVolumes(discovered);
-        setSelectedTargetId(
-          firstConnected?.id ?? refreshedTargets[0]?.id ?? "",
+        const activePlanningJob = planningJobs.find(
+          (item) => item.status === "running",
         );
+        const restoredTargetId =
+          activePlanningJob?.targetId ??
+          firstConnected?.id ??
+          refreshedTargets[0]?.id ??
+          "";
+        setSelectedTargetId(restoredTargetId);
         setLibraryPath(settings.settings.local.libraryPath);
         setJob(
           jobs.find((item) => ["running", "paused"].includes(item.status)) ??
             jobs[0] ??
             null,
         );
+        const restoredPlanningJob =
+          activePlanningJob ??
+          planningJobs.find((item) => item.targetId === restoredTargetId) ??
+          null;
+        setPlanningJob((current) =>
+          selectLatestPlanningJob(current, restoredPlanningJob),
+        );
+        if (restoredPlanningJob?.plan) setPlan(restoredPlanningJob.plan);
       })
       .catch((reason) => {
         if (!disposed) setError(normalizeBackupError(reason).message);
@@ -154,6 +174,28 @@ export function BackupPanel() {
     };
   }, []);
 
+  useEffect(() => {
+    let disposed = false;
+    const unlisten = listen<BackupPlanningJob>(
+      "backup-planning-progress",
+      (event) => {
+        if (disposed) return;
+        setPlanningJob((current) =>
+          selectLatestPlanningJob(current, event.payload),
+        );
+        if (event.payload.status === "completed") {
+          setPlan(event.payload.plan);
+        } else if (event.payload.status === "failed" && event.payload.error) {
+          setError(event.payload.error);
+        }
+      },
+    );
+    return () => {
+      disposed = true;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
   const selectedTarget = targets.find(
     (target) => target.id === selectedTargetId,
   );
@@ -163,6 +205,8 @@ export function BackupPanel() {
       )
     : undefined;
   const active = job?.status === "running" || job?.status === "paused";
+  const planning = planningJob?.status === "running";
+  const busy = active || planning;
   const insufficientSpace = Boolean(
     plan &&
     selectedVolume &&
@@ -172,7 +216,7 @@ export function BackupPanel() {
   const auditTargetPath = selectedVolume?.mountPath;
 
   useEffect(() => {
-    if (!auditTargetId || !auditTargetPath || !libraryPath || active) {
+    if (!auditTargetId || !auditTargetPath || !libraryPath || busy) {
       setSnapshot(null);
       setHistory([]);
       return;
@@ -198,7 +242,7 @@ export function BackupPanel() {
     return () => {
       disposed = true;
     };
-  }, [active, auditRevision, auditTargetId, auditTargetPath, libraryPath]);
+  }, [auditRevision, auditTargetId, auditTargetPath, busy, libraryPath]);
 
   async function openBackup() {
     if (!selectedTarget || !selectedVolume) return;
@@ -243,21 +287,30 @@ export function BackupPanel() {
 
   async function preparePlan() {
     if (!selectedTarget || !selectedVolume || !libraryPath) return;
-    setPlanning(true);
     setPlan(null);
+    setPlanningJob(null);
     setError(null);
     try {
-      setPlan(
-        await prepareBackupPlan(
-          selectedTarget.id,
-          selectedVolume.mountPath,
-          libraryPath,
-        ),
+      const started = await startBackupPlanningJob(
+        selectedTarget.id,
+        selectedVolume.mountPath,
+        libraryPath,
       );
+      setPlanningJob((current) => selectLatestPlanningJob(current, started));
+      if (started.status === "completed") setPlan(started.plan);
     } catch (reason) {
       setError(normalizeBackupError(reason).message);
-    } finally {
-      setPlanning(false);
+    }
+  }
+
+  async function cancelPlanning() {
+    if (!planningJob || planningJob.status !== "running") return;
+    setError(null);
+    try {
+      const updated = await cancelBackupPlanningJob(planningJob.id);
+      setPlanningJob((current) => selectLatestPlanningJob(current, updated));
+    } catch (reason) {
+      setError(normalizeBackupError(reason).message);
     }
   }
 
@@ -336,7 +389,7 @@ export function BackupPanel() {
           <button
             type="button"
             className="secondary"
-            disabled={active}
+            disabled={busy}
             onClick={() => setRegistrationOpen((value) => !value)}
           >
             Zarejestruj nowy dysk
@@ -401,10 +454,11 @@ export function BackupPanel() {
                   name="backup-target"
                   value={target.id}
                   checked={selectedTargetId === target.id}
-                  disabled={active}
+                  disabled={busy}
                   onChange={() => {
                     setSelectedTargetId(target.id);
                     setPlan(null);
+                    setPlanningJob(null);
                   }}
                 />
                 <span
@@ -468,6 +522,13 @@ export function BackupPanel() {
             </p>
           )}
         </div>
+      )}
+
+      {planningJob && planningJob.status !== "completed" && (
+        <BackupPlanningProgress
+          job={planningJob}
+          onCancel={cancelPlanning}
+        />
       )}
 
       {plan && selectedVolume && (
@@ -785,6 +846,96 @@ function BackupPlanPreview({
   );
 }
 
+function BackupPlanningProgress({
+  job,
+  onCancel,
+}: {
+  job: BackupPlanningJob;
+  onCancel: () => Promise<void>;
+}) {
+  const indeterminate = job.totalBytes === null;
+  const percent = useMemo(() => {
+    if (job.totalBytes === null) return null;
+    if (job.totalBytes === 0) return 100;
+    return Math.min(
+      100,
+      Math.round((job.processedBytes / job.totalBytes) * 100),
+    );
+  }, [job.processedBytes, job.totalBytes]);
+  const running = job.status === "running";
+  const statusLabel =
+    job.status === "cancelled"
+      ? "Planowanie zostało anulowane"
+      : job.status === "failed"
+        ? "Planowanie nie powiodło się"
+        : job.cancelRequested
+          ? "Anulowanie planowania…"
+          : "Przygotowywanie planu backupu";
+
+  return (
+    <div
+      className={`backup-progress backup-progress--${job.status}`}
+      aria-live="polite"
+    >
+      <div className="backup-progress__heading">
+        <div>
+          <p className="section-label">PLANOWANIE {job.id.slice(0, 8)}</p>
+          <h3>{statusLabel}</h3>
+          {running && <strong>{phaseLabels[job.phase]}</strong>}
+        </div>
+        {running && percent !== null && (
+          <span className="backup-percent">{percent}%</span>
+        )}
+      </div>
+      {running && (
+        <div
+          className={`backup-progress__track${indeterminate ? " backup-progress__track--indeterminate" : ""}`}
+          role="progressbar"
+          aria-label={phaseLabels[job.phase]}
+          aria-valuemin={indeterminate ? undefined : 0}
+          aria-valuemax={indeterminate ? undefined : 100}
+          aria-valuenow={percent ?? undefined}
+        >
+          <span
+            style={percent === null ? undefined : { width: `${percent}%` }}
+          />
+        </div>
+      )}
+      <div className="backup-metrics">
+        <Metric
+          label="Pliki"
+          value={`${job.processedFileCount}${job.totalFileCount === null ? "" : ` / ${job.totalFileCount}`}`}
+        />
+        <Metric
+          label="Dane"
+          value={`${formatBytes(job.processedBytes)}${job.totalBytes === null ? "" : ` / ${formatBytes(job.totalBytes)}`}`}
+        />
+        <Metric label="Faza" value={phaseLabels[job.phase]} />
+      </div>
+      {job.currentPath && (
+        <p className="backup-current">Aktualnie: {job.currentPath}</p>
+      )}
+      {job.error && (
+        <p className="backup-error" role="alert">
+          {job.error}
+        </p>
+      )}
+      {running && (
+        <div className="button-row backup-controls">
+          <button
+            type="button"
+            className="danger-quiet"
+            disabled={job.cancelRequested}
+            onClick={() => void onCancel()}
+          >
+            {job.cancelRequested ? "Anulowanie…" : "Anuluj planowanie"}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function BackupProgress({
   job,
   controlling,
@@ -932,6 +1083,18 @@ function samePath(left: string, right: string): boolean {
   const normalize = (value: string) =>
     value.replace(/[\\/]+$/, "").toLocaleLowerCase();
   return normalize(left) === normalize(right);
+}
+
+function selectLatestPlanningJob(
+  current: BackupPlanningJob | null,
+  incoming: BackupPlanningJob | null,
+): BackupPlanningJob | null {
+  if (!incoming) return current;
+  if (!current || current.id !== incoming.id) return incoming;
+  if (current.status !== "running" && incoming.status === "running") {
+    return current;
+  }
+  return current.updatedAtUnixMs > incoming.updatedAtUnixMs ? current : incoming;
 }
 
 function formatBytes(bytes: number): string {

@@ -3,11 +3,15 @@ import { open, save } from "@tauri-apps/plugin-dialog";
 import { clearThumbnailCache } from "../../shared/sources";
 import { describeOperationalError } from "../../shared/appStatus";
 import { ErrorNotice } from "../../shared/ErrorNotice";
+import { useTranslation } from "react-i18next";
+import { setAppLanguage } from "../../i18n";
 import {
   exportPortableSettings,
   importPortableSettings,
   loadSettings,
+  localizeSettingsError,
   normalizeSettingsError,
+  renderFileNamePreview,
   renderFolderPreview,
   restoreSettingsBackup,
   saveSettings,
@@ -17,9 +21,27 @@ import {
   type SettingsCommandError,
 } from "../../shared/settings";
 
-type Notice = { kind: "success" | "error" | "info"; text: string };
+type Notice =
+  | {
+      kind: "success" | "error" | "info";
+      translationKey: string;
+      text?: never;
+    }
+  | {
+      kind: "success" | "error" | "info";
+      text: string;
+      translationKey?: never;
+      error?: never;
+    }
+  | {
+      kind: "error";
+      error: unknown;
+      text?: never;
+      translationKey?: never;
+    };
 
 export function SettingsPanel() {
+  const { t, i18n } = useTranslation();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState("");
   const [backupAvailable, setBackupAvailable] = useState(false);
@@ -29,7 +51,7 @@ export function SettingsPanel() {
 
   const validationErrors = useMemo(
     () => (settings ? validateSettings(settings) : []),
-    [settings],
+    [settings, i18n.resolvedLanguage],
   );
   const dirty = settings !== null && JSON.stringify(settings) !== savedSnapshot;
 
@@ -45,16 +67,16 @@ export function SettingsPanel() {
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "info",
-        text:
+        translationKey:
           response.source === "defaults"
-            ? "Wczytano bezpieczne ustawienia domyślne. Zapis utworzy plik użytkownika."
-            : "Wczytano ustawienia użytkownika.",
+            ? "settings.notices.loadedDefaults"
+            : "settings.notices.loadedUser",
       });
     } catch (error) {
       const normalized = normalizeSettingsError(error);
       setLoadError(normalized);
       setBackupAvailable(normalized.backupAvailable === true);
-      setNotice({ kind: "error", text: normalized.message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -65,6 +87,7 @@ export function SettingsPanel() {
     setSavedSnapshot(JSON.stringify(value));
     setBackupAvailable(hasBackup);
     setLoadError(null);
+    void setAppLanguage(value.local.uiLanguage);
   }
 
   async function persist() {
@@ -75,10 +98,10 @@ export function SettingsPanel() {
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
-        text: "Ustawienia zostały bezpiecznie zapisane.",
+        translationKey: "settings.notices.saved",
       });
     } catch (error) {
-      setNotice({ kind: "error", text: normalizeSettingsError(error).message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -91,10 +114,10 @@ export function SettingsPanel() {
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
-        text: "Przywrócono poprzednią wersję ustawień.",
+        translationKey: "settings.notices.restored",
       });
     } catch (error) {
-      setNotice({ kind: "error", text: normalizeSettingsError(error).message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -105,7 +128,7 @@ export function SettingsPanel() {
     const path = await open({
       directory: true,
       multiple: false,
-      title: "Wybierz główny katalog biblioteki",
+      title: t("settings.library.dialogTitle"),
     });
     if (path) {
       setSettings({
@@ -117,7 +140,7 @@ export function SettingsPanel() {
 
   async function exportConfiguration() {
     const path = await save({
-      title: "Eksportuj ustawienia Photo Importer",
+      title: t("settings.transfer.exportDialog"),
       defaultPath: "photo-importer-settings.json",
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
@@ -127,10 +150,10 @@ export function SettingsPanel() {
       await exportPortableSettings(path);
       setNotice({
         kind: "success",
-        text: "Wyeksportowano przenośne ustawienia.",
+        translationKey: "settings.notices.exported",
       });
     } catch (error) {
-      setNotice({ kind: "error", text: normalizeSettingsError(error).message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -139,7 +162,7 @@ export function SettingsPanel() {
   async function importConfiguration() {
     const path = await open({
       multiple: false,
-      title: "Importuj ustawienia Photo Importer",
+      title: t("settings.transfer.importDialog"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
@@ -149,10 +172,10 @@ export function SettingsPanel() {
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
-        text: "Zaimportowano i zapisano przenośne ustawienia.",
+        translationKey: "settings.notices.imported",
       });
     } catch (error) {
-      setNotice({ kind: "error", text: normalizeSettingsError(error).message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -164,10 +187,10 @@ export function SettingsPanel() {
       await clearThumbnailCache();
       setNotice({
         kind: "success",
-        text: "Cache miniaturek został wyczyszczony. Podglądy zostaną wygenerowane ponownie.",
+        translationKey: "settings.notices.cacheCleared",
       });
     } catch (error) {
-      setNotice({ kind: "error", text: normalizeSettingsError(error).message });
+      setNotice({ kind: "error", error });
     } finally {
       setBusy(false);
     }
@@ -176,7 +199,7 @@ export function SettingsPanel() {
   if (!settings) {
     return (
       <section className="settings-empty" aria-live="polite">
-        <p>{busy ? "Wczytywanie ustawień…" : "Nie można wczytać ustawień."}</p>
+        <p>{busy ? t("settings.loading") : t("settings.loadFailed")}</p>
         {loadError ? (
           <ErrorNotice
             error={describeOperationalError(loadError, "settings")}
@@ -187,7 +210,7 @@ export function SettingsPanel() {
         )}
         <div className="button-row">
           <button type="button" onClick={() => void reload()} disabled={busy}>
-            Spróbuj ponownie
+            {t("common.retry")}
           </button>
           {backupAvailable && (
             <button
@@ -196,14 +219,12 @@ export function SettingsPanel() {
               onClick={() => void restoreBackup()}
               disabled={busy}
             >
-              Przywróć kopię
+              {t("settings.restoreBackup")}
             </button>
           )}
         </div>
         {loadError?.code === "corruptedPrimary" && (
-          <p className="help-text">
-            Uszkodzony plik pozostawiono bez zmian, aby nie utracić danych.
-          </p>
+          <p className="help-text">{t("settings.corruptFilePreserved")}</p>
         )}
       </section>
     );
@@ -232,15 +253,12 @@ export function SettingsPanel() {
     <section className="settings-layout">
       <div className="settings-heading">
         <div>
-          <p className="section-label">KONFIGURACJA</p>
-          <h2>Ustawienia importu</h2>
-          <p>
-            Ustawienia lokalne zostają na tym komputerze. Profile i reguły można
-            eksportować.
-          </p>
+          <p className="section-label">{t("settings.heading.eyebrow")}</p>
+          <h2>{t("settings.heading.title")}</h2>
+          <p>{t("settings.heading.description")}</p>
         </div>
         <span className={dirty ? "dirty-badge" : "saved-badge"}>
-          {dirty ? "Niezapisane zmiany" : "Zapisano"}
+          {dirty ? t("settings.heading.dirty") : t("settings.heading.saved")}
         </span>
       </div>
 
@@ -254,22 +272,22 @@ export function SettingsPanel() {
       )}
 
       <SettingsSection
-        title="Biblioteka"
-        description="Lokalne położenie zdjęć na tym komputerze."
+        title={t("settings.library.title")}
+        description={t("settings.library.description")}
       >
-        <Field label="Główny katalog biblioteki" wide>
+        <Field label={t("settings.library.path")} wide>
           <div className="path-control">
             <input
               readOnly
               value={settings.local.libraryPath ?? ""}
-              placeholder="Nie wybrano katalogu"
+              placeholder={t("settings.library.placeholder")}
             />
             <button
               type="button"
               className="secondary"
               onClick={() => void chooseLibrary()}
             >
-              Wybierz
+              {t("common.choose")}
             </button>
             {settings.local.libraryPath && (
               <button
@@ -282,7 +300,7 @@ export function SettingsPanel() {
                   })
                 }
               >
-                Wyczyść
+                {t("common.clear")}
               </button>
             )}
           </div>
@@ -290,10 +308,10 @@ export function SettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Import"
-        description="Domyślne zachowanie po wykryciu znanego nośnika."
+        title={t("settings.import.title")}
+        description={t("settings.import.description")}
       >
-        <Field label="Operacja na plikach">
+        <Field label={t("settings.import.operation")}>
           <select
             value={settings.portable.import.defaultOperation}
             onChange={(event) =>
@@ -303,13 +321,13 @@ export function SettingsPanel() {
               })
             }
           >
-            <option value="copy">Kopiuj (zalecane)</option>
+            <option value="copy">{t("settings.import.copy")}</option>
             <option value="moveAfterVerification">
-              Przenieś po weryfikacji
+              {t("settings.import.move")}
             </option>
           </select>
         </Field>
-        <Field label="Po podłączeniu znanej karty">
+        <Field label={t("settings.import.knownCard")}>
           <SourceBehaviorSelect
             value={settings.portable.import.defaultSourceBehavior}
             onChange={(defaultSourceBehavior) =>
@@ -317,7 +335,7 @@ export function SettingsPanel() {
             }
           />
         </Field>
-        <Field label="Nowe wydarzenie po przerwie">
+        <Field label={t("settings.import.eventGap")}>
           <div className="number-with-unit">
             <input
               type="number"
@@ -330,31 +348,40 @@ export function SettingsPanel() {
                 })
               }
             />
-            <span>minut</span>
+            <span>{t("settings.import.minutes")}</span>
           </div>
         </Field>
       </SettingsSection>
 
       <SettingsSection
-        title="Nazewnictwo"
-        description="Foldery wydarzeń przechodzących przez północ nadal użyją daty początku wydarzenia."
+        title={t("settings.naming.title")}
+        description={t("settings.naming.description")}
       >
-        <Field label="Szablon folderu" wide>
+        <Field label={t("settings.naming.folderTemplate")} wide>
           <input
             value={settings.portable.naming.folderTemplate}
             onChange={(event) =>
               updateNaming({ folderTemplate: event.target.value })
             }
           />
-          <p className="help-text">
-            Dostępne: {"{year}"}, {"{month}"}, {"{day}"}, {"{date}"},{" "}
-            {"{event_name}"}, {"{camera_alias}"}
-          </p>
+          <p className="help-text">{t("settings.naming.folderHelp")}</p>
           <code className="template-preview">
             {renderFolderPreview(settings.portable.naming.folderTemplate)}
           </code>
         </Field>
-        <Field label="Konflikt nazwy">
+        <Field label={t("settings.naming.fileTemplate")} wide>
+          <input
+            value={settings.portable.naming.fileNameTemplate}
+            onChange={(event) =>
+              updateNaming({ fileNameTemplate: event.target.value })
+            }
+          />
+          <p className="help-text">{t("settings.naming.fileHelp")}</p>
+          <code className="template-preview">
+            {renderFileNamePreview(settings.portable.naming.fileNameTemplate)}
+          </code>
+        </Field>
+        <Field label={t("settings.naming.collision")}>
           <select
             value={settings.portable.naming.collisionPolicy}
             onChange={(event) =>
@@ -364,21 +391,21 @@ export function SettingsPanel() {
               })
             }
           >
-            <option value="ask">Zatrzymaj i zapytaj</option>
-            <option value="appendSequence">Dodaj kolejny numer</option>
+            <option value="ask">{t("settings.naming.collisionAsk")}</option>
+            <option value="appendSequence">
+              {t("settings.naming.collisionSequence")}
+            </option>
           </select>
         </Field>
       </SettingsSection>
 
       <SettingsSection
-        title="Profile aparatów"
-        description="EXIF pomoże rozpoznać aparat niezależnie od użytej karty."
+        title={t("settings.profiles.title")}
+        description={t("settings.profiles.description")}
       >
         <div className="profiles" data-wide>
           {settings.portable.cameraProfiles.length === 0 && (
-            <p className="empty-copy">
-              Brak profili. Możesz dodać pierwszy aparat ręcznie.
-            </p>
+            <p className="empty-copy">{t("settings.profiles.empty")}</p>
           )}
           {settings.portable.cameraProfiles.map((profile, index) => (
             <CameraProfileEditor
@@ -418,7 +445,9 @@ export function SettingsPanel() {
             onClick={() => {
               const profile: CameraProfile = {
                 id: crypto.randomUUID(),
-                name: `Aparat ${settings.portable.cameraProfiles.length + 1}`,
+                name: t("settings.profiles.defaultName", {
+                  number: settings.portable.cameraProfiles.length + 1,
+                }),
                 exifMatchers: [],
                 defaultTimeOffsetSeconds: 0,
               };
@@ -434,20 +463,18 @@ export function SettingsPanel() {
               });
             }}
           >
-            + Dodaj profil aparatu
+            {t("settings.profiles.add")}
           </button>
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="Powiązane nośniki"
-        description="Powiązania powstaną podczas rozpoznawania kart; można je tutaj usunąć."
+        title={t("settings.bindings.title")}
+        description={t("settings.bindings.description")}
       >
         <div className="bindings" data-wide>
           {settings.local.sourceBindings.length === 0 ? (
-            <p className="empty-copy">
-              Nie zapamiętano jeszcze żadnego nośnika.
-            </p>
+            <p className="empty-copy">{t("settings.bindings.empty")}</p>
           ) : (
             settings.local.sourceBindings.map((binding) => (
               <div className="binding-row" key={binding.id}>
@@ -464,7 +491,7 @@ export function SettingsPanel() {
                         )?.name,
                     )
                     .filter(Boolean)
-                    .join(", ") || "Nieznany aparat"}
+                    .join(", ") || t("settings.profiles.unknownCamera")}
                 </span>
                 <SourceBehaviorSelect
                   value={binding.behavior}
@@ -498,7 +525,7 @@ export function SettingsPanel() {
                     })
                   }
                 >
-                  Usuń
+                  {t("common.remove")}
                 </button>
               </div>
             ))
@@ -507,11 +534,33 @@ export function SettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Zachowanie aplikacji"
-        description="Ustawienia specyficzne dla bieżącego użytkownika i komputera."
+        title={t("settings.behavior.title")}
+        description={t("settings.behavior.description")}
       >
+        <Field label={t("settings.language.label")}>
+          <select
+            value={settings.local.uiLanguage}
+            aria-label={t("settings.language.label")}
+            aria-describedby="ui-language-description"
+            onChange={(event) => {
+              const uiLanguage = event.target
+                .value as AppSettings["local"]["uiLanguage"];
+              setSettings({
+                ...settings,
+                local: { ...settings.local, uiLanguage },
+              });
+              void setAppLanguage(uiLanguage);
+            }}
+          >
+            <option value="en">English</option>
+            <option value="pl">Polski</option>
+          </select>
+          <p className="help-text" id="ui-language-description">
+            {t("settings.language.description")}
+          </p>
+        </Field>
         <Toggle
-          label="Uruchamiaj przy logowaniu"
+          label={t("settings.behavior.startAtLogin")}
           checked={settings.local.startAtLogin}
           onChange={(startAtLogin) =>
             setSettings({
@@ -521,7 +570,7 @@ export function SettingsPanel() {
           }
         />
         <Toggle
-          label="Minimalizuj do zasobnika systemowego"
+          label={t("settings.behavior.minimizeToTray")}
           checked={settings.local.minimizeToTray}
           onChange={(minimizeToTray) =>
             setSettings({
@@ -531,7 +580,7 @@ export function SettingsPanel() {
           }
         />
         <Toggle
-          label="Pokaż okno, gdy plan importu jest gotowy"
+          label={t("settings.behavior.showWhenPlanReady")}
           checked={settings.local.showWindowWhenPlanReady}
           onChange={(showWindowWhenPlanReady) =>
             setSettings({
@@ -541,7 +590,7 @@ export function SettingsPanel() {
           }
         />
         <Toggle
-          label="Powiadomienia systemowe"
+          label={t("settings.behavior.notifications")}
           checked={settings.local.notificationsEnabled}
           onChange={(notificationsEnabled) =>
             setSettings({
@@ -550,7 +599,7 @@ export function SettingsPanel() {
             })
           }
         />
-        <Field label="Po restarcie aplikacji">
+        <Field label={t("settings.behavior.afterRestart")}>
           <select
             value={settings.local.resumeAfterRestart}
             onChange={(event) =>
@@ -563,11 +612,13 @@ export function SettingsPanel() {
               })
             }
           >
-            <option value="ask">Zapytaj przed wznowieniem</option>
-            <option value="automatic">Wznów automatycznie</option>
+            <option value="ask">{t("settings.behavior.resumeAsk")}</option>
+            <option value="automatic">
+              {t("settings.behavior.resumeAutomatic")}
+            </option>
           </select>
         </Field>
-        <Field label="Równoległe importy">
+        <Field label={t("settings.behavior.concurrency")}>
           <input
             type="number"
             min={1}
@@ -587,8 +638,8 @@ export function SettingsPanel() {
       </SettingsSection>
 
       <SettingsSection
-        title="Miniatury"
-        description="Lokalny cache znajduje się w systemowym katalogu cache aplikacji i nie zmienia biblioteki zdjęć."
+        title={t("settings.thumbnails.title")}
+        description={t("settings.thumbnails.description")}
       >
         <div className="button-row" data-wide>
           <button
@@ -597,14 +648,14 @@ export function SettingsPanel() {
             disabled={busy}
             onClick={() => void clearPreviews()}
           >
-            Wyczyść cache miniaturek
+            {t("settings.thumbnails.clear")}
           </button>
         </div>
       </SettingsSection>
 
       <SettingsSection
-        title="Przenoszenie ustawień"
-        description="Eksport nie zawiera ścieżek ani powiązań nośników tego komputera."
+        title={t("settings.transfer.title")}
+        description={t("settings.transfer.description")}
       >
         <div className="button-row" data-wide>
           <button
@@ -612,9 +663,9 @@ export function SettingsPanel() {
             className="secondary"
             onClick={() => void exportConfiguration()}
             disabled={busy || dirty}
-            title={dirty ? "Najpierw zapisz zmiany" : undefined}
+            title={dirty ? t("settings.transfer.saveFirst") : undefined}
           >
-            Eksportuj JSON
+            {t("settings.transfer.export")}
           </button>
           <button
             type="button"
@@ -622,7 +673,7 @@ export function SettingsPanel() {
             onClick={() => void importConfiguration()}
             disabled={busy}
           >
-            Importuj JSON
+            {t("settings.transfer.import")}
           </button>
           {backupAvailable && (
             <button
@@ -631,7 +682,7 @@ export function SettingsPanel() {
               onClick={() => void restoreBackup()}
               disabled={busy}
             >
-              Przywróć poprzednią wersję
+              {t("settings.transfer.restorePrevious")}
             </button>
           )}
         </div>
@@ -644,14 +695,14 @@ export function SettingsPanel() {
           onClick={() => void reload()}
           disabled={busy || !dirty}
         >
-          Odrzuć zmiany
+          {t("settings.actions.discard")}
         </button>
         <button
           type="button"
           onClick={() => void persist()}
           disabled={busy || !dirty || validationErrors.length > 0}
         >
-          {busy ? "Zapisywanie…" : "Zapisz ustawienia"}
+          {busy ? t("settings.actions.saving") : t("settings.actions.save")}
         </button>
       </footer>
     </section>
@@ -702,14 +753,17 @@ function SourceBehaviorSelect({
   value: "ask" | "autoPreparePlan" | "ignore";
   onChange: (value: "ask" | "autoPreparePlan" | "ignore") => void;
 }) {
+  const { t } = useTranslation();
   return (
     <select
       value={value}
       onChange={(event) => onChange(event.target.value as typeof value)}
     >
-      <option value="ask">Pokaż powiadomienie i zapytaj</option>
-      <option value="autoPreparePlan">Przygotuj plan automatycznie</option>
-      <option value="ignore">Ignoruj</option>
+      <option value="ask">{t("settings.sourceBehavior.ask")}</option>
+      <option value="autoPreparePlan">
+        {t("settings.sourceBehavior.autoPreparePlan")}
+      </option>
+      <option value="ignore">{t("settings.sourceBehavior.ignore")}</option>
     </select>
   );
 }
@@ -744,6 +798,7 @@ function CameraProfileEditor({
   onChange: (profile: CameraProfile) => void;
   onRemove: () => void;
 }) {
+  const { t } = useTranslation();
   const matcher = profile.exifMatchers[0] ?? {
     make: null,
     model: null,
@@ -760,18 +815,18 @@ function CameraProfileEditor({
     <div className="profile-card">
       <div className="profile-card__title">
         <input
-          aria-label="Nazwa profilu"
+          aria-label={t("settings.profiles.name")}
           value={profile.name}
           onChange={(event) =>
             onChange({ ...profile, name: event.target.value })
           }
         />
         <button type="button" className="danger-quiet" onClick={onRemove}>
-          Usuń profil
+          {t("settings.profiles.remove")}
         </button>
       </div>
       <div className="profile-fields">
-        <Field label="Producent EXIF">
+        <Field label={t("settings.profiles.make")}>
           <input
             value={matcher.make ?? ""}
             onChange={(event) =>
@@ -779,7 +834,7 @@ function CameraProfileEditor({
             }
           />
         </Field>
-        <Field label="Model EXIF">
+        <Field label={t("settings.profiles.model")}>
           <input
             value={matcher.model ?? ""}
             onChange={(event) =>
@@ -787,7 +842,7 @@ function CameraProfileEditor({
             }
           />
         </Field>
-        <Field label="Numer seryjny EXIF">
+        <Field label={t("settings.profiles.serial")}>
           <input
             value={matcher.serialNumber ?? ""}
             onChange={(event) =>
@@ -795,7 +850,7 @@ function CameraProfileEditor({
             }
           />
         </Field>
-        <Field label="Domyślna korekta czasu (sekundy)">
+        <Field label={t("settings.profiles.timeOffset")}>
           <input
             type="number"
             value={profile.defaultTimeOffsetSeconds}
@@ -813,12 +868,17 @@ function CameraProfileEditor({
 }
 
 function NoticeView({ notice }: { notice: Notice }) {
+  const { t } = useTranslation();
   return (
     <div
       className={`notice notice--${notice.kind}`}
       role={notice.kind === "error" ? "alert" : "status"}
     >
-      {notice.text}
+      {"error" in notice
+        ? localizeSettingsError(notice.error)
+        : notice.translationKey
+          ? t(notice.translationKey)
+          : notice.text}
     </div>
   );
 }

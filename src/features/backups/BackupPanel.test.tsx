@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   BackupJob,
+  BackupPlanningJob,
   BackupPlan,
   BackupRun,
   BackupSnapshot,
@@ -31,6 +32,12 @@ vi.mock("@tauri-apps/api/event", () => ({
 async function emit(job: BackupJob) {
   for (const handler of eventBus.get("backup-progress") ?? []) {
     handler({ event: "backup-progress", payload: job });
+  }
+}
+
+async function emitPlanning(job: BackupPlanningJob) {
+  for (const handler of eventBus.get("backup-planning-progress") ?? []) {
+    handler({ event: "backup-planning-progress", payload: job });
   }
 }
 
@@ -115,6 +122,30 @@ function job(patch: Partial<BackupJob> = {}): BackupJob {
   };
 }
 
+function planningJob(
+  patch: Partial<BackupPlanningJob> = {},
+): BackupPlanningJob {
+  return {
+    id: "planning-12345678",
+    targetId: target.id,
+    sourcePath: "C:\\Library",
+    targetPath: "E:\\",
+    status: "completed",
+    phase: "hashing",
+    processedFileCount: 7,
+    totalFileCount: 7,
+    processedBytes: 600,
+    totalBytes: 600,
+    currentPath: null,
+    cancelRequested: false,
+    startedAtUnixMs: 1,
+    updatedAtUnixMs: 2,
+    error: null,
+    plan,
+    ...patch,
+  };
+}
+
 function settings() {
   const response = settingsResponseFixture();
   response.settings.local.libraryPath = "C:\\Library";
@@ -187,10 +218,11 @@ describe("BackupPanel", () => {
       calls.push(command);
       if (command === "list_backup_targets") return [target];
       if (command === "list_backup_jobs") return [];
+      if (command === "list_backup_planning_jobs") return [];
       if (command === "load_settings") return settings();
       if (command === "list_media_sources") return [volume];
       if (command === "recognize_backup_target") return target;
-      if (command === "prepare_backup_plan") return plan;
+      if (command === "start_backup_planning_job") return planningJob();
       if (command === "start_backup_job") return job();
       if (command === "pause_backup_job") return job({ pauseRequested: true });
       if (command === "resume_backup_job") return job();
@@ -270,11 +302,12 @@ describe("BackupPanel", () => {
     mockIPC((command) => {
       if (command === "list_backup_targets") return [target];
       if (command === "list_backup_jobs") return [];
+      if (command === "list_backup_planning_jobs") return [];
       if (command === "load_settings") return settings();
       if (command === "list_media_sources")
         return [{ ...volume, availableBytes: 100 }];
       if (command === "recognize_backup_target") return target;
-      if (command === "prepare_backup_plan") return plan;
+      if (command === "start_backup_planning_job") return planningJob();
     });
     const user = userEvent.setup();
     render(<BackupPanel />);
@@ -290,11 +323,65 @@ describe("BackupPanel", () => {
     ).toBeDisabled();
   });
 
+  it("restores planning progress, becomes determinate while hashing and cancels", async () => {
+    const calls: string[] = [];
+    const scanning = planningJob({
+      status: "running",
+      phase: "scanningLibrary",
+      processedFileCount: 2,
+      totalFileCount: null,
+      processedBytes: 300,
+      totalBytes: null,
+      currentPath: "C:\\Library\\a.jpg",
+      plan: null,
+    });
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "list_backup_targets") return [target];
+      if (command === "list_backup_jobs") return [];
+      if (command === "list_backup_planning_jobs") return [scanning];
+      if (command === "load_settings") return settings();
+      if (command === "list_media_sources") return [volume];
+      if (command === "recognize_backup_target") return target;
+      if (command === "cancel_backup_planning_job")
+        return { ...scanning, cancelRequested: true };
+    });
+    const user = userEvent.setup();
+    render(<BackupPanel />);
+
+    const progress = await screen.findByRole("progressbar", {
+      name: "Skanowanie biblioteki",
+    });
+    expect(progress).not.toHaveAttribute("aria-valuenow");
+    expect(screen.getByText(/C:\\Library\\a.jpg/)).toBeInTheDocument();
+
+    await emitPlanning(
+      planningJob({
+        status: "running",
+        processedFileCount: 5,
+        totalFileCount: 10,
+        processedBytes: 500,
+        totalBytes: 1000,
+        currentPath: "C:\\Library\\b.jpg",
+        plan: null,
+      }),
+    );
+    expect(await screen.findByText("50%")).toBeInTheDocument();
+    expect(screen.getByText("5 / 10")).toBeInTheDocument();
+
+    await user.click(screen.getByRole("button", { name: "Anuluj planowanie" }));
+    await waitFor(() =>
+      expect(calls).toContain("cancel_backup_planning_job"),
+    );
+    expect(await screen.findByText("Anulowanie planowania…")).toBeInTheDocument();
+  });
+
   it("registers a new target using the system directory picker", async () => {
     openDialog.mockResolvedValue("F:\\");
     mockIPC((command) => {
       if (command === "list_backup_targets") return [];
       if (command === "list_backup_jobs") return [];
+      if (command === "list_backup_planning_jobs") return [];
       if (command === "load_settings") return settings();
       if (command === "list_media_sources") return [];
       if (command === "register_backup_target")
@@ -324,6 +411,7 @@ describe("BackupPanel", () => {
         return [
           job({ phase: "verifying", totalBytes: 100, processedBytes: 75 }),
         ];
+      if (command === "list_backup_planning_jobs") return [];
       if (command === "load_settings") return settings();
       if (command === "list_media_sources") return [];
     });
@@ -342,6 +430,7 @@ describe("BackupPanel", () => {
       calls.push(command);
       if (command === "list_backup_targets") return [target];
       if (command === "list_backup_jobs") return [];
+      if (command === "list_backup_planning_jobs") return [];
       if (command === "load_settings") return settings();
       if (command === "list_media_sources") return [volume];
       if (command === "recognize_backup_target") return target;

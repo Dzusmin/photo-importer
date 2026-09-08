@@ -1,5 +1,5 @@
 import { mockIPC } from "@tauri-apps/api/mocks";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
@@ -60,10 +60,10 @@ describe("SourceScanner", () => {
     const user = userEvent.setup();
     render(<SourceScanner onHealthChange={healthChanged} />);
 
-    expect(await screen.findByText("Brak uprawnień")).toBeInTheDocument();
+    expect(await screen.findByText("Permission denied")).toBeInTheDocument();
     expect(screen.getByText("—")).toBeInTheDocument();
     expect(screen.getByText("liczba źródeł jest nieznana")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Spróbuj ponownie" }));
+    await user.click(screen.getByRole("button", { name: "Try again" }));
 
     expect(
       await screen.findByText("Czekam na kartę pamięci."),
@@ -153,6 +153,260 @@ describe("SourceScanner", () => {
     ).toBeInTheDocument();
   });
 
+  it("streams discovered photos into a live preview before completion", async () => {
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "get_media_thumbnail") {
+        return {
+          key: "streamed-thumb",
+          path: "C:\\Cache\\streamed.jpg",
+          mimeType: "image/jpeg",
+          width: 320,
+          height: 200,
+          cacheHit: false,
+          timings: {
+            lookupMs: 0,
+            decodeMs: 1,
+            resizeMs: 0,
+            encodeAndPersistMs: 0,
+            databaseMs: 0,
+            totalMs: 1,
+          },
+        };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+    await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+
+    await emit("scan-items", {
+      scanId: "scan-1",
+      path: "E:\\",
+      items: [mediaItem()],
+    });
+
+    const preview = await screen.findByRole("region", {
+      name: "Zdjęcia znalezione podczas skanowania",
+    });
+    expect(within(preview).getByText("IMG.JPG")).toBeInTheDocument();
+    expect(screen.queryByText("Skanowanie zakończone")).not.toBeInTheDocument();
+  });
+
+  it("collapses scanned events, toggles them from the heading and persists the view", async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const response = mediaResult();
+    response.events[0].endsAtUnixMs += 60 * 60 * 1_000;
+    mockIPC((command, args) => {
+      calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+    await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        status: "completed",
+        phase: "completed",
+        result: response,
+      }),
+    );
+
+    const collapsedHeading = await screen.findByRole("button", {
+      name: /Rozwiń wydarzenie wydarzenie-01/,
+    });
+    expect(collapsedHeading).toHaveAttribute("aria-expanded", "false");
+    expect(
+      within(collapsedHeading).getByText(/\d{2}:\d{2}–\d{2}:\d{2}/),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("IMG.JPG")).not.toBeInTheDocument();
+
+    collapsedHeading.focus();
+    await user.keyboard("{Enter}");
+    expect(
+      screen.getByRole("button", { name: /Zwiń wydarzenie wydarzenie-01/ }),
+    ).toHaveAttribute("aria-expanded", "true");
+    expect(screen.getByText("IMG.JPG")).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.command === "save_pending_source_workflow" &&
+            JSON.stringify(call.args).includes('"expandedEventIndexes":[1]'),
+        ),
+      ).toBe(true),
+    );
+
+    await user.click(screen.getByRole("button", { name: "Zwiń wszystkie" }));
+    expect(screen.queryByText("IMG.JPG")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Rozwiń wszystkie" }));
+    expect(screen.getByText("IMG.JPG")).toBeInTheDocument();
+  });
+
+  it("generates the large preview from RAW only after it is clicked", async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const response = mediaResult();
+    response.scan.items[0].files[0] = {
+      ...response.scan.items[0].files[0],
+      path: "E:\\DCIM\\IMG.CR3",
+      relativePath: "DCIM\\IMG.CR3",
+      kind: "raw",
+    };
+    response.events[0].items = response.scan.items;
+    mockIPC((command, args) => {
+      calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "get_media_thumbnail") {
+        return {
+          key: `raw-${String((args as { maxDimension: number }).maxDimension)}`,
+          path: "C:\\Cache\\raw-preview.jpg",
+          mimeType: "image/jpeg",
+          width: 320,
+          height: 200,
+          cacheHit: false,
+          timings: {
+            lookupMs: 0,
+            decodeMs: 1,
+            resizeMs: 0,
+            encodeAndPersistMs: 0,
+            databaseMs: 0,
+            totalMs: 1,
+          },
+        };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+    await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        status: "completed",
+        phase: "completed",
+        result: response,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Rozwiń wydarzenie wydarzenie-01/,
+      }),
+    );
+    await user.click(
+      (await screen.findByText("IMG.CR3")).closest('[role="button"]')!,
+    );
+
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.command === "get_media_thumbnail" &&
+            call.args.path === "E:\\DCIM\\IMG.CR3" &&
+            call.args.maxDimension === 1_600,
+        ),
+      ).toBe(true),
+    );
+    expect(
+      calls.some((call) => call.command === "allow_original_jpeg_preview"),
+    ).toBe(false);
+
+    await user.keyboard("{Escape}");
+    expect(
+      screen.queryByRole("dialog", { name: "Podgląd zdjęcia" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("restores ratings and rotation, then persists individual metadata changes", async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const response = mediaResult();
+    mockIPC((command, args) => {
+      calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "list_photo_user_metadata") {
+        return [
+          {
+            sourceRoot: "E:\\",
+            itemKey: "img",
+            rating: 4,
+            rejected: false,
+            rotationDegrees: 90,
+            updatedAtUnixMs: 1,
+          },
+        ];
+      }
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+    await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        status: "completed",
+        phase: "completed",
+        result: response,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", {
+        name: /Rozwiń wydarzenie wydarzenie-01/,
+      }),
+    );
+
+    expect(
+      await screen.findByRole("combobox", { name: "Ocena zdjęcia" }),
+    ).toHaveValue("4");
+    await user.selectOptions(
+      screen.getByRole("combobox", { name: "Ocena zdjęcia" }),
+      "5",
+    );
+    await user.click(screen.getByRole("button", { name: "Odrzuć" }));
+    await user.click(screen.getByText("IMG.JPG").closest('[role="button"]')!);
+    await user.click(screen.getByRole("button", { name: "Obróć o 90°" }));
+
+    await waitFor(() => {
+      const saves = calls.filter(
+        (call) => call.command === "save_photo_user_metadata",
+      );
+      expect(saves).toHaveLength(3);
+      expect(JSON.stringify(saves[saves.length - 1]?.args)).toContain(
+        '"rotationDegrees":180',
+      );
+    });
+  });
+
   it("allows correction, planning, starting and pausing an import", async () => {
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     const response = mediaResult();
@@ -166,6 +420,9 @@ describe("SourceScanner", () => {
       if (command === "list_media_scans" || command === "list_import_sessions")
         return [];
       if (command === "start_media_scan") return scanJobFixture();
+      if (command === "allow_original_jpeg_preview") {
+        return (args as { path: string }).path;
+      }
       if (command === "get_media_thumbnail") {
         return {
           key: "thumb",
@@ -210,12 +467,8 @@ describe("SourceScanner", () => {
     const user = userEvent.setup();
     render(<SourceScanner />);
     expect(
-      screen.getByRole("navigation", { name: "Etapy importu" }),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Źródło").closest("li")).toHaveAttribute(
-      "aria-current",
-      "step",
-    );
+      screen.queryByRole("navigation", { name: "Etapy importu" }),
+    ).not.toBeInTheDocument();
     await user.click(await screen.findByRole("button", { name: "Skanuj" }));
     await emit(
       "scan-progress",
@@ -231,6 +484,33 @@ describe("SourceScanner", () => {
         "step",
       ),
     );
+
+    await user.click(
+      screen.getByRole("button", {
+        name: /Rozwiń wydarzenie wydarzenie-01/,
+      }),
+    );
+    await user.click(screen.getByText("IMG.JPG").closest('[role="button"]')!);
+    expect(
+      await screen.findByRole("dialog", { name: "Podgląd zdjęcia" }),
+    ).toBeInTheDocument();
+    await waitFor(() =>
+      expect(
+        calls.some(
+          (call) =>
+            call.command === "allow_original_jpeg_preview" &&
+            call.args.path === "E:\\DCIM\\IMG.JPG",
+        ),
+      ).toBe(true),
+    );
+    expect(
+      calls.some(
+        (call) =>
+          call.command === "get_media_thumbnail" &&
+          call.args.maxDimension === 1_600,
+      ),
+    ).toBe(false);
+    await user.click(screen.getByRole("button", { name: "Zamknij" }));
 
     const select = await screen.findByLabelText("Zaznacz do korekty czasu");
     await user.click(select);
@@ -279,6 +559,21 @@ describe("SourceScanner", () => {
     expect(calls.some((call) => call.command === "pause_import_session")).toBe(
       true,
     );
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ status: "completed" }),
+    );
+    await user.click(await screen.findByRole("button", { name: "Usuń plan" }));
+    await waitFor(() =>
+      expect(screen.queryByText("event\\IMG.JPG")).not.toBeInTheDocument(),
+    );
+    expect(
+      calls.filter((call) => call.command === "delete_pending_source_workflow"),
+    ).toHaveLength(2);
+    expect(
+      screen.getByText("Plan importu został usunięty."),
+    ).toBeInTheDocument();
   });
 
   it("requires profile confirmation and automatically prepares a plan for a new card", async () => {
@@ -428,6 +723,7 @@ describe("SourceScanner", () => {
         eventNames: state === "planReady" ? { 1: "Wakacje" } : {},
         excludedItemKeys: [],
         itemProfileAssignments: {},
+        expandedEventIndexes: state === "planReady" ? [1] : [],
       },
       error: state === "failedRecoverable" ? "Podłącz kartę ponownie" : null,
       updatedAtUnixMs: index,

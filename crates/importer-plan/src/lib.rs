@@ -29,6 +29,7 @@ pub struct EventPlanInput {
 pub struct BuildImportPlanRequest {
     pub library_root: PathBuf,
     pub folder_template: String,
+    pub file_name_template: String,
     pub collision_policy: CollisionPolicy,
     pub events: Vec<EventPlanInput>,
     pub excluded_item_keys: BTreeSet<String>,
@@ -120,6 +121,12 @@ pub enum PlanError {
     UnbalancedTemplate,
     #[error("folder template resolves outside the library")]
     UnsafeTemplatePath,
+    #[error("file name template contains an unsupported variable: {{{0}}}")]
+    UnknownFileNameTemplateVariable(String),
+    #[error("file name template has unbalanced braces")]
+    UnbalancedFileNameTemplate,
+    #[error("file name template resolves to an invalid file name")]
+    UnsafeFileNameTemplate,
 }
 
 pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, PlanError> {
@@ -134,6 +141,7 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
     let mut conflicts = Vec::new();
     let mut excluded_item_count = 0;
     let mut excluded_file_count = 0;
+    let mut item_counter = 0_u64;
     let excluded_source_paths: HashSet<_> = request
         .excluded_source_paths
         .iter()
@@ -166,6 +174,7 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
                 excluded_item_count += 1;
                 continue;
             }
+            item_counter = item_counter.saturating_add(1);
             let context = request
                 .item_contexts
                 .get(&item.key)
@@ -180,10 +189,14 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
                 &request.library_root,
                 &folder,
                 &item,
+                &request.file_name_template,
+                item_counter,
+                event_name,
+                context,
                 request.collision_policy,
                 &mut planned_paths,
                 &excluded_source_paths,
-            );
+            )?;
             conflicts.extend(item_conflicts);
             planned_items
                 .entry(folder)
@@ -245,10 +258,14 @@ fn plan_item(
     library_root: &Path,
     folder: &Path,
     item: &MediaItem,
+    file_name_template: &str,
+    item_counter: u64,
+    event_name: &str,
+    context: &TemplateContext,
     collision_policy: CollisionPolicy,
     planned_paths: &mut HashSet<String>,
     excluded_source_paths: &HashSet<String>,
-) -> (Vec<PlannedFileOperation>, Vec<PlanConflict>) {
+) -> Result<(Vec<PlannedFileOperation>, Vec<PlanConflict>), PlanError> {
     let mut sequence = 1_u32;
     loop {
         let candidates: Vec<_> = item
@@ -256,12 +273,20 @@ fn plan_item(
             .iter()
             .filter(|file| !excluded_source_paths.contains(&normalized_path_key(&file.path)))
             .map(|file| {
-                let file_name = sequenced_file_name(&file.relative_path, sequence);
+                let templated_name = render_file_name_template(
+                    file_name_template,
+                    item.captured_at_unix_ms,
+                    event_name,
+                    context,
+                    &file.relative_path,
+                    item_counter,
+                )?;
+                let file_name = sequenced_file_name(Path::new(&templated_name), sequence);
                 let relative = folder.join(file_name);
                 let destination = library_root.join(&relative);
-                (file, relative, destination)
+                Ok((file, relative, destination))
             })
-            .collect();
+            .collect::<Result<Vec<_>, PlanError>>()?;
         let found: Vec<_> = candidates
             .iter()
             .filter_map(|(_, _, destination)| {
@@ -299,10 +324,88 @@ fn plan_item(
                     destination_path,
                 })
                 .collect();
-            return (operations, conflicts);
+            return Ok((operations, conflicts));
         }
         sequence = sequence.saturating_add(1);
     }
+}
+
+fn render_file_name_template(
+    template: &str,
+    timestamp_ms: u64,
+    event_name: &str,
+    context: &TemplateContext,
+    original_path: &Path,
+    counter: u64,
+) -> Result<String, PlanError> {
+    let timestamp = i64::try_from(timestamp_ms).unwrap_or(i64::MAX);
+    let date = Local
+        .timestamp_millis_opt(timestamp)
+        .single()
+        .or_else(|| Local.timestamp_millis_opt(0).single())
+        .expect("Unix epoch is representable in the local timezone");
+    let original_name = original_path
+        .file_stem()
+        .unwrap_or_default()
+        .to_string_lossy();
+    let mut rendered = String::new();
+    let mut characters = template.chars().peekable();
+    while let Some(character) = characters.next() {
+        if character == '{' {
+            let mut variable = String::new();
+            let mut closed = false;
+            for inner in characters.by_ref() {
+                if inner == '}' {
+                    closed = true;
+                    break;
+                }
+                if inner == '{' {
+                    return Err(PlanError::UnbalancedFileNameTemplate);
+                }
+                variable.push(inner);
+            }
+            if !closed {
+                return Err(PlanError::UnbalancedFileNameTemplate);
+            }
+            let value = match variable.as_str() {
+                "year" => format!("{:04}", date.year()),
+                "month" => format!("{:02}", date.month()),
+                "day" => format!("{:02}", date.day()),
+                "date" => format!("{:04}-{:02}-{:02}", date.year(), date.month(), date.day()),
+                "event_name" => event_name.to_owned(),
+                "camera_make" => context.camera_make.clone().unwrap_or_default(),
+                "camera_model" => context.camera_model.clone().unwrap_or_default(),
+                "camera_alias" => context.camera_alias.clone().unwrap_or_default(),
+                "source_alias" => context.source_alias.clone().unwrap_or_default(),
+                "original_name" => original_name.to_string(),
+                _ => {
+                    let Some(width) = variable.strip_prefix("counter:0") else {
+                        return Err(PlanError::UnknownFileNameTemplateVariable(variable));
+                    };
+                    let Ok(width) = width.parse::<usize>() else {
+                        return Err(PlanError::UnknownFileNameTemplateVariable(variable));
+                    };
+                    if !(1..=9).contains(&width) {
+                        return Err(PlanError::UnknownFileNameTemplateVariable(variable));
+                    }
+                    format!("{counter:0width$}")
+                }
+            };
+            rendered.push_str(&sanitize_component_fragment(&value));
+        } else if character == '}' {
+            return Err(PlanError::UnbalancedFileNameTemplate);
+        } else {
+            rendered.push(character);
+        }
+    }
+
+    let stem = sanitize_path_component(&rendered);
+    if stem == "_" || stem == "." || stem == ".." || rendered.contains(['/', '\\']) {
+        return Err(PlanError::UnsafeFileNameTemplate);
+    }
+    Ok(original_path.extension().map_or(stem.clone(), |extension| {
+        format!("{stem}.{}", extension.to_string_lossy())
+    }))
 }
 
 fn sequenced_file_name(path: &Path, sequence: u32) -> String {
@@ -482,6 +585,7 @@ mod tests {
         BuildImportPlanRequest {
             library_root: root.to_path_buf(),
             folder_template: "{year}/{date}-{event_name}".to_owned(),
+            file_name_template: "{original_name}".to_owned(),
             collision_policy: policy,
             events: vec![EventPlanInput {
                 event: EventGroup {
@@ -711,6 +815,41 @@ mod tests {
             plan.conflicts
                 .iter()
                 .any(|conflict| conflict.kind == PlanConflictKind::DuplicateDestination)
+        );
+    }
+
+    #[test]
+    fn renders_metadata_and_one_formatted_counter_for_a_whole_media_set() {
+        let root = tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            vec![
+                item("a", &["IMG_1.CR3", "IMG_1.JPG", "IMG_1.xmp"]),
+                item("b", &["IMG_2.CR3", "IMG_2.JPG"]),
+            ],
+            CollisionPolicy::Ask,
+        );
+        request.file_name_template =
+            "{date}_{event_name}_{camera_alias}_{counter:04}_{original_name}".to_owned();
+        request.context.camera_alias = Some("Aparat A".to_owned());
+
+        let plan = build_import_plan(request).unwrap();
+        let first_names: Vec<_> = plan.events[0].items[0]
+            .files
+            .iter()
+            .map(|file| file.destination_path.file_name().unwrap().to_string_lossy())
+            .collect();
+        assert_eq!(first_names.len(), 3);
+        assert!(first_names.iter().all(|name| name.contains("_0001_IMG_1.")));
+        let second_names: Vec<_> = plan.events[0].items[1]
+            .files
+            .iter()
+            .map(|file| file.destination_path.file_name().unwrap().to_string_lossy())
+            .collect();
+        assert!(
+            second_names
+                .iter()
+                .all(|name| name.contains("_0002_IMG_2."))
         );
     }
 

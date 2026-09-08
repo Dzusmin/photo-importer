@@ -1,15 +1,16 @@
 use importer_domain::settings::{
     AppSettings, CURRENT_SETTINGS_SCHEMA_VERSION, CollisionPolicy, DEFAULT_EVENT_GAP_MINUTES,
-    DEFAULT_FOLDER_TEMPLATE, ImportOperation, SettingsValidationErrorCode, SourceBehavior,
+    DEFAULT_FILE_NAME_TEMPLATE, DEFAULT_FOLDER_TEMPLATE, ImportOperation,
+    SettingsValidationErrorCode, SourceBehavior, UiLanguage,
 };
 use serde_json::Value;
 
-const SETTINGS_V2_FIXTURE: &str = include_str!("fixtures/settings-v2.json");
+const SETTINGS_V4_FIXTURE: &str = include_str!("fixtures/settings-v4.json");
 
 #[test]
-fn v2_fixture_matches_the_default_contract() {
+fn v4_fixture_matches_the_default_contract() {
     let fixture: AppSettings =
-        serde_json::from_str(SETTINGS_V2_FIXTURE).expect("fixture should deserialize");
+        serde_json::from_str(SETTINGS_V4_FIXTURE).expect("fixture should deserialize");
 
     assert_eq!(fixture, AppSettings::default());
     assert_eq!(fixture.schema_version, CURRENT_SETTINGS_SCHEMA_VERSION);
@@ -30,27 +31,32 @@ fn v2_fixture_matches_the_default_contract() {
         DEFAULT_FOLDER_TEMPLATE
     );
     assert_eq!(
+        fixture.portable.naming.file_name_template,
+        DEFAULT_FILE_NAME_TEMPLATE
+    );
+    assert_eq!(
         fixture.portable.naming.collision_policy,
         CollisionPolicy::Ask
     );
+    assert_eq!(fixture.local.ui_language, UiLanguage::En);
     fixture.validate().expect("fixture should be valid");
 }
 
 #[test]
-fn v2_fixture_round_trips_without_changing_its_json_shape() {
+fn v4_fixture_round_trips_without_changing_its_json_shape() {
     let fixture: AppSettings =
-        serde_json::from_str(SETTINGS_V2_FIXTURE).expect("fixture should deserialize");
+        serde_json::from_str(SETTINGS_V4_FIXTURE).expect("fixture should deserialize");
     let expected_json: Value =
-        serde_json::from_str(SETTINGS_V2_FIXTURE).expect("fixture should be JSON");
+        serde_json::from_str(SETTINGS_V4_FIXTURE).expect("fixture should be JSON");
     let serialized_json = serde_json::to_value(fixture).expect("settings should serialize");
 
     assert_eq!(serialized_json, expected_json);
 }
 
 #[test]
-fn v2_contract_rejects_unknown_fields() {
+fn v4_contract_rejects_unknown_fields() {
     let mut fixture: Value =
-        serde_json::from_str(SETTINGS_V2_FIXTURE).expect("fixture should be JSON");
+        serde_json::from_str(SETTINGS_V4_FIXTURE).expect("fixture should be JSON");
     fixture["portable"]["unexpected"] = Value::Bool(true);
 
     let error = serde_json::from_value::<AppSettings>(fixture)
@@ -60,9 +66,9 @@ fn v2_contract_rejects_unknown_fields() {
 }
 
 #[test]
-fn v2_contract_reports_an_unsupported_version() {
+fn v4_contract_reports_an_unsupported_version() {
     let mut fixture: AppSettings =
-        serde_json::from_str(SETTINGS_V2_FIXTURE).expect("fixture should deserialize");
+        serde_json::from_str(SETTINGS_V4_FIXTURE).expect("fixture should deserialize");
     fixture.schema_version = CURRENT_SETTINGS_SCHEMA_VERSION + 1;
 
     let errors = fixture

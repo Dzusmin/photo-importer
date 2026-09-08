@@ -1,11 +1,10 @@
+import { i18n } from "../i18n/instance";
+
 export type AppStatus = "connecting" | "ready" | "degraded" | "error";
 
-export const APP_STATUS_LABELS: Record<AppStatus, string> = {
-  connecting: "Łączenie…",
-  ready: "Gotowa",
-  degraded: "Ograniczone działanie",
-  error: "Brak połączenia",
-};
+export function getAppStatusLabel(status: AppStatus): string {
+  return i18n.t(`status.${status}`);
+}
 
 export interface ActionableError {
   kind: "backend" | "permission" | "read" | "settings" | "unknown";
@@ -31,10 +30,9 @@ export function describeOperationalError(
   ) {
     return {
       kind: "backend",
-      title: "Brak połączenia z backendem",
-      impact: "Monitor nośników i skanowanie są teraz niedostępne.",
-      action:
-        "Sprawdź, czy aplikacja uruchomiła się poprawnie, i ponów połączenie.",
+      title: i18n.t("errors.backend.title"),
+      impact: i18n.t("errors.backend.impact"),
+      action: i18n.t("errors.backend.action"),
       technicalDetails: details,
     };
   }
@@ -47,10 +45,9 @@ export function describeOperationalError(
   ) {
     return {
       kind: "permission",
-      title: "Brak uprawnień",
-      impact: "Aplikacja nie może odczytać wybranego nośnika lub katalogu.",
-      action:
-        "Nadaj dostęp do lokalizacji albo wybierz inny katalog i spróbuj ponownie.",
+      title: i18n.t("errors.permission.title"),
+      impact: i18n.t("errors.permission.impact"),
+      action: i18n.t("errors.permission.action"),
       technicalDetails: details,
     };
   }
@@ -62,38 +59,35 @@ export function describeOperationalError(
   ) {
     return {
       kind: "settings",
-      title: "Uszkodzone ustawienia",
-      impact: "Nie można bezpiecznie wczytać konfiguracji aplikacji.",
-      action: "Przywróć kopię ustawień lub ponów odczyt po poprawieniu pliku.",
+      title: i18n.t("errors.corruptSettings.title"),
+      impact: i18n.t("errors.corruptSettings.impact"),
+      action: i18n.t("errors.corruptSettings.action"),
       technicalDetails: details,
     };
   }
   if (fallbackKind === "read") {
     return {
       kind: "read",
-      title: "Nie udało się odczytać źródeł",
-      impact:
-        "Liczba dostępnych źródeł jest nieznana; skanowanie ręczne nadal może być dostępne.",
-      action: "Sprawdź podłączenie nośnika i spróbuj ponownie.",
+      title: i18n.t("errors.read.title"),
+      impact: i18n.t("errors.read.impact"),
+      action: i18n.t("errors.read.action"),
       technicalDetails: details,
     };
   }
   if (fallbackKind === "settings") {
     return {
       kind: "settings",
-      title: "Nie udało się wczytać ustawień",
-      impact: "Opcje importu nie są dostępne.",
-      action:
-        "Spróbuj ponownie lub przywróć kopię ustawień, jeśli jest dostępna.",
+      title: i18n.t("errors.settings.title"),
+      impact: i18n.t("errors.settings.impact"),
+      action: i18n.t("errors.settings.action"),
       technicalDetails: details,
     };
   }
   return {
     kind: "unknown",
-    title: "Nieznany błąd",
-    impact: "Nie udało się zakończyć operacji.",
-    action:
-      "Spróbuj ponownie. Jeśli problem wróci, skopiuj szczegóły techniczne.",
+    title: i18n.t("errors.unknown.title"),
+    impact: i18n.t("errors.unknown.impact"),
+    action: i18n.t("errors.unknown.action"),
     technicalDetails: details,
   };
 }
@@ -110,7 +104,7 @@ function technicalDetails(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
   if (typeof error === "string") return error;
   try {
-    return JSON.stringify(error, null, 2) || "Brak dodatkowych informacji.";
+    return JSON.stringify(error, null, 2) || i18n.t("errors.noDetails");
   } catch {
     return String(error);
   }

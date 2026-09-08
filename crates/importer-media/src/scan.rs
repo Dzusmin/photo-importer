@@ -1,4 +1,4 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -110,6 +110,9 @@ pub struct ScanProgress {
     pub processed_file_count: usize,
     pub total_supported_file_count: Option<usize>,
     pub current_path: Option<PathBuf>,
+    /// Complete snapshots of items added or changed since the previous update.
+    /// A RAW/JPEG/XMP group can therefore be emitted more than once.
+    pub updated_items: Vec<MediaItem>,
 }
 
 #[derive(Debug, Error)]
@@ -120,7 +123,7 @@ pub enum ScanError {
     Cancelled,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct ItemBuilder {
     files: Vec<MediaFile>,
 }
@@ -222,6 +225,9 @@ fn scan_media_internal(
         if !entry.file_type().is_file() {
             continue;
         }
+        if is_ignored_file(entry.path()) {
+            continue;
+        }
         discovered_file_count += 1;
         let path = entry.path();
         if discovered_file_count % 25 == 0 {
@@ -231,6 +237,7 @@ fn scan_media_internal(
                 processed_file_count: 0,
                 total_supported_file_count: None,
                 current_path: Some(path.to_path_buf()),
+                updated_items: Vec::new(),
             });
         }
         let Some(kind) = media_kind(path) else {
@@ -248,6 +255,7 @@ fn scan_media_internal(
         processed_file_count: 0,
         total_supported_file_count: Some(supported_file_count),
         current_path: None,
+        updated_items: Vec::new(),
     });
     let metadata_started = Instant::now();
     let (groups, metadata_warnings) =
@@ -279,12 +287,20 @@ fn process_files_sequential(
     let mut groups: BTreeMap<String, ItemBuilder> = BTreeMap::new();
     let mut warnings = Vec::new();
     let supported_file_count = supported_files.len();
+    let expected_counts = expected_group_counts(root, supported_files);
+    let mut touched_keys = BTreeSet::new();
     for (index, (path, kind)) in supported_files.iter().enumerate() {
         if is_cancelled() {
             return Err(ScanError::Cancelled);
         }
         match process_file(root, path, *kind, time_reader) {
-            Ok((key, file)) => groups.entry(key).or_default().files.push(file),
+            Ok((key, file)) => {
+                let group = groups.entry(key.clone()).or_default();
+                group.files.push(file);
+                if expected_counts.get(&key) == Some(&group.files.len()) {
+                    touched_keys.insert(key);
+                }
+            }
             Err(warning) => warnings.push(warning),
         }
         let processed_file_count = index + 1;
@@ -295,6 +311,7 @@ fn process_files_sequential(
                 processed_file_count,
                 total_supported_file_count: Some(supported_file_count),
                 current_path: Some(path.clone()),
+                updated_items: take_updated_items(&groups, &mut touched_keys),
             });
         }
     }
@@ -327,6 +344,9 @@ fn process_files_parallel(
     let stopped = AtomicBool::new(false);
     let (sender, receiver) = mpsc::channel::<ProcessedFile>();
     let mut received = Vec::with_capacity(count);
+    let mut preview_groups = BTreeMap::<String, ItemBuilder>::new();
+    let expected_counts = expected_group_counts(root, supported_files);
+    let mut touched_keys = BTreeSet::new();
 
     std::thread::scope(|scope| {
         for _ in 0..worker_count {
@@ -368,6 +388,13 @@ fn process_files_parallel(
                 return Err(ScanError::Cancelled);
             };
             let current_path = file.path.clone();
+            if let Ok((key, media_file)) = &file.result {
+                let group = preview_groups.entry(key.clone()).or_default();
+                group.files.push(media_file.clone());
+                if expected_counts.get(key) == Some(&group.files.len()) {
+                    touched_keys.insert(key.clone());
+                }
+            }
             received.push(file);
             if processed_file_count % 10 == 0 || processed_file_count == count {
                 on_progress(ScanProgress {
@@ -376,6 +403,7 @@ fn process_files_parallel(
                     processed_file_count,
                     total_supported_file_count: Some(count),
                     current_path: Some(current_path),
+                    updated_items: take_updated_items(&preview_groups, &mut touched_keys),
                 });
             }
         }
@@ -443,83 +471,7 @@ fn build_scan(
 ) -> Result<MediaScan, ScanError> {
     let mut items: Vec<_> = groups
         .into_iter()
-        .map(|(key, mut builder)| {
-            builder
-                .files
-                .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
-            let has_raw = builder
-                .files
-                .iter()
-                .any(|file| file.kind == MediaFileKind::Raw);
-            let has_jpeg = builder
-                .files
-                .iter()
-                .any(|file| file.kind == MediaFileKind::Jpeg);
-            let has_sidecar = builder
-                .files
-                .iter()
-                .any(|file| file.kind == MediaFileKind::Xmp);
-            let embedded_time = builder
-                .files
-                .iter()
-                .filter_map(|file| {
-                    Some(CaptureTimestamp {
-                        unix_ms: file.embedded_captured_at_unix_ms?,
-                        source: file.embedded_time_source?,
-                    })
-                })
-                .min_by_key(|time| time.unix_ms);
-            let modified_time = builder
-                .files
-                .iter()
-                .filter(|file| file.kind != MediaFileKind::Xmp)
-                .map(|file| file.modified_at_unix_ms)
-                .min()
-                .unwrap_or(0);
-            let (captured_at_unix_ms, time_source) = embedded_time.map_or_else(
-                || {
-                    (
-                        modified_time,
-                        if modified_time == 0 {
-                            CaptureTimeSource::Unknown
-                        } else {
-                            CaptureTimeSource::FileModified
-                        },
-                    )
-                },
-                |time| (time.unix_ms, time.source),
-            );
-            let total_size_bytes = builder.files.iter().map(|file| file.size_bytes).sum();
-            let identities: Vec<_> = builder
-                .files
-                .iter()
-                .filter_map(|file| file.camera_identity.clone())
-                .collect();
-            let camera_identity = identities.first().cloned();
-            let camera_metadata_conflict = camera_identity.as_ref().is_some_and(|first| {
-                identities
-                    .iter()
-                    .skip(1)
-                    .any(|identity| !same_camera(first, identity))
-            });
-            MediaItem {
-                key,
-                original_captured_at_unix_ms: captured_at_unix_ms,
-                captured_at_unix_ms,
-                time_source,
-                time_correction_seconds: 0,
-                total_size_bytes,
-                files: builder.files,
-                has_raw_jpeg_pair: has_raw && has_jpeg,
-                has_sidecar,
-                camera_identity: if camera_metadata_conflict {
-                    None
-                } else {
-                    camera_identity
-                },
-                camera_metadata_conflict,
-            }
-        })
+        .map(|(key, builder)| build_item(key, builder))
         .collect();
     items.sort_by_key(|item| (item.captured_at_unix_ms, item.key.clone()));
     let total_size_bytes = items.iter().map(|item| item.total_size_bytes).sum();
@@ -533,6 +485,109 @@ fn build_scan(
         warnings,
         timings,
     })
+}
+
+fn take_updated_items(
+    groups: &BTreeMap<String, ItemBuilder>,
+    touched_keys: &mut BTreeSet<String>,
+) -> Vec<MediaItem> {
+    std::mem::take(touched_keys)
+        .into_iter()
+        .filter_map(|key| {
+            let builder = groups.get(&key)?.clone();
+            Some(build_item(key, builder))
+        })
+        .collect()
+}
+
+fn expected_group_counts(
+    root: &Path,
+    supported_files: &[(PathBuf, MediaFileKind)],
+) -> BTreeMap<String, usize> {
+    let mut counts = BTreeMap::new();
+    for (path, kind) in supported_files {
+        let relative_path = path.strip_prefix(root).unwrap_or(path);
+        *counts.entry(item_key(relative_path, *kind)).or_default() += 1;
+    }
+    counts
+}
+
+fn build_item(key: String, mut builder: ItemBuilder) -> MediaItem {
+    builder
+        .files
+        .sort_by(|left, right| left.relative_path.cmp(&right.relative_path));
+    let has_raw = builder
+        .files
+        .iter()
+        .any(|file| file.kind == MediaFileKind::Raw);
+    let has_jpeg = builder
+        .files
+        .iter()
+        .any(|file| file.kind == MediaFileKind::Jpeg);
+    let has_sidecar = builder
+        .files
+        .iter()
+        .any(|file| file.kind == MediaFileKind::Xmp);
+    let embedded_time = builder
+        .files
+        .iter()
+        .filter_map(|file| {
+            Some(CaptureTimestamp {
+                unix_ms: file.embedded_captured_at_unix_ms?,
+                source: file.embedded_time_source?,
+            })
+        })
+        .min_by_key(|time| time.unix_ms);
+    let modified_time = builder
+        .files
+        .iter()
+        .filter(|file| file.kind != MediaFileKind::Xmp)
+        .map(|file| file.modified_at_unix_ms)
+        .min()
+        .unwrap_or(0);
+    let (captured_at_unix_ms, time_source) = embedded_time.map_or_else(
+        || {
+            (
+                modified_time,
+                if modified_time == 0 {
+                    CaptureTimeSource::Unknown
+                } else {
+                    CaptureTimeSource::FileModified
+                },
+            )
+        },
+        |time| (time.unix_ms, time.source),
+    );
+    let total_size_bytes = builder.files.iter().map(|file| file.size_bytes).sum();
+    let identities: Vec<_> = builder
+        .files
+        .iter()
+        .filter_map(|file| file.camera_identity.clone())
+        .collect();
+    let camera_identity = identities.first().cloned();
+    let camera_metadata_conflict = camera_identity.as_ref().is_some_and(|first| {
+        identities
+            .iter()
+            .skip(1)
+            .any(|identity| !same_camera(first, identity))
+    });
+    MediaItem {
+        key,
+        original_captured_at_unix_ms: captured_at_unix_ms,
+        captured_at_unix_ms,
+        time_source,
+        time_correction_seconds: 0,
+        total_size_bytes,
+        files: builder.files,
+        has_raw_jpeg_pair: has_raw && has_jpeg,
+        has_sidecar,
+        camera_identity: if camera_metadata_conflict {
+            None
+        } else {
+            camera_identity
+        },
+        camera_metadata_conflict,
+    }
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -583,6 +638,11 @@ fn preferred_scan_root(root: &Path) -> PathBuf {
         .map(|name| root.join(name))
         .find(|path| path.is_dir())
         .unwrap_or_else(|| root.to_path_buf())
+}
+
+fn is_ignored_file(path: &Path) -> bool {
+    path.file_name()
+        .is_some_and(|name| name.to_string_lossy().starts_with("._"))
 }
 
 fn media_kind(path: &Path) -> Option<MediaFileKind> {
@@ -679,6 +739,12 @@ mod tests {
                 && progress.total_supported_file_count == Some(2)
                 && progress.processed_file_count == 2
         }));
+        let streamed: Vec<_> = phases
+            .iter()
+            .flat_map(|progress| &progress.updated_items)
+            .collect();
+        assert_eq!(streamed.len(), 2);
+        assert!(streamed.iter().all(|item| item.files.len() == 1));
     }
 
     #[test]

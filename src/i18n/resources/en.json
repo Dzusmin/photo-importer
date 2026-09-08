@@ -1,0 +1,257 @@
+{
+  "brand": { "tagline": "Photo workflow" },
+  "common": {
+    "retry": "Try again",
+    "choose": "Choose",
+    "clear": "Clear",
+    "remove": "Remove",
+    "ready": "Ready"
+  },
+  "app": {
+    "navigationLabel": "Main navigation",
+    "navigation": {
+      "import": "Import",
+      "backup": "Backup",
+      "activity": "Activity",
+      "settings": "Settings"
+    },
+    "views": {
+      "home": {
+        "eyebrow": "WORKSPACE",
+        "title": "Import",
+        "description": "Choose a source and prepare photos for your library."
+      },
+      "backup": {
+        "eyebrow": "LIBRARY PROTECTION",
+        "title": "Backup",
+        "description": "Manage backups and keep your collection safe."
+      },
+      "activity": {
+        "eyebrow": "OPERATIONS CENTER",
+        "title": "Activity",
+        "description": "Monitor recent events and application status."
+      },
+      "settings": {
+        "eyebrow": "CONFIGURATION",
+        "title": "Settings",
+        "description": "Customize imports, camera profiles and automation."
+      }
+    },
+    "systemStatus": "System status",
+    "reconnect": "Reconnect",
+    "diagnostics": {
+      "eyebrow": "TECHNICAL INFORMATION",
+      "title": "System",
+      "description": "Useful when troubleshooting",
+      "label": "Application diagnostics",
+      "product": "Product",
+      "version": "Version",
+      "system": "System",
+      "importEngine": "Import engine"
+    }
+  },
+  "status": {
+    "connecting": "Connecting…",
+    "ready": "Ready",
+    "degraded": "Limited functionality",
+    "error": "Disconnected"
+  },
+  "errors": {
+    "backend": {
+      "title": "Backend unavailable",
+      "impact": "Media monitoring and scanning are currently unavailable.",
+      "action": "Check that the application started correctly, then reconnect."
+    },
+    "permission": {
+      "title": "Permission denied",
+      "impact": "The application cannot read the selected media or folder.",
+      "action": "Grant access to the location or choose another folder and try again."
+    },
+    "corruptSettings": {
+      "title": "Corrupted settings",
+      "impact": "The application configuration cannot be loaded safely.",
+      "action": "Restore the settings backup or retry after fixing the file."
+    },
+    "read": {
+      "title": "Could not read sources",
+      "impact": "The number of available sources is unknown; manual scanning may still be available.",
+      "action": "Check the media connection and try again."
+    },
+    "settings": {
+      "title": "Could not load settings",
+      "impact": "Import options are unavailable.",
+      "action": "Try again or restore the settings backup if one is available."
+    },
+    "unknown": {
+      "title": "Unknown error",
+      "impact": "The operation could not be completed.",
+      "action": "Try again. If the problem returns, copy the technical details."
+    },
+    "noDetails": "No additional information."
+  },
+  "errorNotice": {
+    "technicalDetails": "Technical details",
+    "copied": "Copied",
+    "copyDetails": "Copy details"
+  },
+  "commandErrors": {
+    "sourceUnavailable": "The selected source is unavailable.",
+    "scanFailed": "The scan operation could not be completed.",
+    "importFailed": "The import operation could not be completed.",
+    "workflowFailed": "The saved import workflow could not be read or updated.",
+    "metadataFailed": "Photo metadata could not be read or saved.",
+    "thumbnailFailed": "The thumbnail operation could not be completed.",
+    "stateUnavailable": "The operation state is temporarily unavailable.",
+    "notFound": "The requested operation no longer exists.",
+    "settingsUnavailable": "Application settings are unavailable.",
+    "backupFailed": "The backup operation could not be completed.",
+    "invalidTargetPath": "The selected backup drive is unavailable.",
+    "invalidSourcePath": "The library folder is unavailable. Check it in settings.",
+    "overlappingBackupRoots": "The library and backup destination cannot be located inside each other.",
+    "wrongBackupTarget": "A different drive is mounted at this path. Connect the correct backup destination.",
+    "invalidTargetMarker": "The backup drive identifier could not be read. No files were saved.",
+    "backupSourceChanged": "A source file changed during backup. Prepare a new plan and try again.",
+    "backupVerificationFailed": "A copied file failed verification. The original file was not changed.",
+    "backupIoFailed": "A file could not be read or written. Check that the drive is connected and has free space.",
+    "openBackupDirectoryFailed": "The backup directory could not be opened.",
+    "unknown": "The operation could not be completed."
+  },
+  "settings": {
+    "language": {
+      "label": "Language",
+      "description": "Choose the language used by the application."
+    },
+    "notices": {
+      "loadedDefaults": "Safe default settings were loaded. Saving will create a user settings file.",
+      "loadedUser": "User settings loaded.",
+      "saved": "Settings were saved safely.",
+      "restored": "The previous settings version was restored.",
+      "exported": "Portable settings exported.",
+      "imported": "Portable settings imported and saved.",
+      "cacheCleared": "The thumbnail cache was cleared. Previews will be generated again."
+    },
+    "errors": {
+      "unknown": "An unknown settings error occurred.",
+      "corruptedPrimary": "The settings file is corrupted.",
+      "backupNotFound": "No valid settings backup was found.",
+      "invalidBackup": "The settings backup is corrupted.",
+      "validationFailed": "The settings could not be saved because they are invalid.",
+      "settingsIoFailed": "The settings file could not be read or written.",
+      "serializeFailed": "The settings export could not be created.",
+      "importReadFailed": "The selected settings file could not be read.",
+      "invalidImport": "The selected file is not a valid settings export.",
+      "invalidImportFormat": "The file belongs to another application or uses an unsupported format.",
+      "unsupportedImportVersion": "This settings export version is not supported.",
+      "exportWriteFailed": "The settings export could not be saved."
+    },
+    "loading": "Loading settings…",
+    "loadFailed": "Settings could not be loaded.",
+    "restoreBackup": "Restore backup",
+    "corruptFilePreserved": "The corrupted file was left unchanged to prevent data loss.",
+    "heading": {
+      "eyebrow": "CONFIGURATION",
+      "title": "Import settings",
+      "description": "Local settings stay on this computer. Profiles and rules can be exported.",
+      "dirty": "Unsaved changes",
+      "saved": "Saved"
+    },
+    "library": {
+      "title": "Library",
+      "description": "Local photo location on this computer.",
+      "path": "Main library folder",
+      "placeholder": "No folder selected",
+      "dialogTitle": "Choose the main library folder"
+    },
+    "import": {
+      "title": "Import",
+      "description": "Default behavior after detecting known media.",
+      "operation": "File operation",
+      "copy": "Copy (recommended)",
+      "move": "Move after verification",
+      "knownCard": "When a known card is connected",
+      "eventGap": "Start a new event after",
+      "minutes": "minutes"
+    },
+    "sourceBehavior": {
+      "ask": "Show a notification and ask",
+      "autoPreparePlan": "Prepare a plan automatically",
+      "ignore": "Ignore"
+    },
+    "naming": {
+      "title": "Naming",
+      "description": "Events spanning midnight still use the event start date.",
+      "folderTemplate": "Folder template",
+      "folderHelp": "Available: {year}, {month}, {day}, {date}, {event_name}, {camera_alias}",
+      "fileTemplate": "File name template",
+      "fileHelp": "Available: {date}, {year}, {month}, {day}, {event_name}, {camera_make}, {camera_model}, {camera_alias}, {source_alias}, {original_name}, and a counter, e.g. {counter:04}. The extension will be preserved.",
+      "collision": "Name conflict",
+      "collisionAsk": "Stop and ask",
+      "collisionSequence": "Append a sequence number"
+    },
+    "profiles": {
+      "title": "Camera profiles",
+      "description": "EXIF data helps identify a camera regardless of the card used.",
+      "empty": "No profiles. You can add the first camera manually.",
+      "defaultName": "Camera {{number}}",
+      "add": "+ Add camera profile",
+      "name": "Profile name",
+      "remove": "Remove profile",
+      "make": "EXIF manufacturer",
+      "model": "EXIF model",
+      "serial": "EXIF serial number",
+      "timeOffset": "Default time correction (seconds)",
+      "unknownCamera": "Unknown camera"
+    },
+    "bindings": {
+      "title": "Associated media",
+      "description": "Associations are created when cards are recognized; they can be removed here.",
+      "empty": "No media has been remembered yet."
+    },
+    "behavior": {
+      "title": "Application behavior",
+      "description": "Settings specific to the current user and computer.",
+      "startAtLogin": "Start at login",
+      "minimizeToTray": "Minimize to the system tray",
+      "showWhenPlanReady": "Show the window when an import plan is ready",
+      "notifications": "System notifications",
+      "afterRestart": "After restarting the application",
+      "resumeAsk": "Ask before resuming",
+      "resumeAutomatic": "Resume automatically",
+      "concurrency": "Concurrent imports"
+    },
+    "thumbnails": {
+      "title": "Thumbnails",
+      "description": "The local cache is stored in the application's system cache directory and does not modify the photo library.",
+      "clear": "Clear thumbnail cache"
+    },
+    "transfer": {
+      "title": "Transfer settings",
+      "description": "Exports do not include paths or media associations from this computer.",
+      "exportDialog": "Export Photo Importer settings",
+      "importDialog": "Import Photo Importer settings",
+      "saveFirst": "Save changes first",
+      "export": "Export JSON",
+      "import": "Import JSON",
+      "restorePrevious": "Restore previous version"
+    },
+    "actions": {
+      "discard": "Discard changes",
+      "saving": "Saving…",
+      "save": "Save settings"
+    },
+    "validation": {
+      "eventGap": "The event gap must be between 1 and 10080 minutes.",
+      "folderPrefix": "Folder template: {{detail}}",
+      "filePrefix": "File name template: {{detail}}",
+      "concurrency": "The number of concurrent imports must be between 1 and 8.",
+      "profileName": "Every camera profile must have a name.",
+      "empty": "cannot be empty.",
+      "pathSeparator": "cannot contain directory separators.",
+      "relativePath": "must be a relative path.",
+      "dotSegments": "cannot contain . or .. path segments.",
+      "invalidBraces": "has invalid braces.",
+      "unclosedBrace": "has an unclosed brace.",
+      "unknownVariable": "contains an unknown variable {{variable}}."
+    }
+  }
+}

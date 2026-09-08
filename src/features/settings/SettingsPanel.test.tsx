@@ -19,31 +19,27 @@ describe("SettingsPanel", () => {
     });
     const user = userEvent.setup();
     render(<SettingsPanel />);
-    await screen.findByText("Nowe wydarzenie po przerwie");
+    await screen.findByText("Start a new event after");
     const gap = screen.getAllByRole("spinbutton")[0];
 
     await user.clear(gap);
     await user.type(gap, "0");
-    expect(screen.getByRole("alert")).toHaveTextContent(
-      "Przerwa między wydarzeniami",
-    );
+    expect(screen.getByRole("alert")).toHaveTextContent("The event gap");
     expect(
-      screen.getByRole("button", { name: "Zapisz ustawienia" }),
+      screen.getByRole("button", { name: "Save settings" }),
     ).toBeDisabled();
 
     await user.clear(gap);
     await user.type(gap, "90");
-    await user.click(screen.getByRole("button", { name: "Zapisz ustawienia" }));
+    await user.click(screen.getByRole("button", { name: "Save settings" }));
     await waitFor(() => expect(saved).toHaveBeenCalledOnce());
     expect(saved.mock.calls[0][0].portable.import.eventGapMinutes).toBe(90);
 
-    await user.click(screen.getByLabelText("Uruchamiaj przy logowaniu"));
-    expect(screen.getByText("Niezapisane zmiany")).toBeInTheDocument();
-    await user.click(screen.getByRole("button", { name: "Odrzuć zmiany" }));
+    await user.click(screen.getByLabelText("Start at login"));
+    expect(screen.getByText("Unsaved changes")).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Discard changes" }));
     await waitFor(() =>
-      expect(
-        screen.getByLabelText("Uruchamiaj przy logowaniu"),
-      ).not.toBeChecked(),
+      expect(screen.getByLabelText("Start at login")).not.toBeChecked(),
     );
   });
 
@@ -54,18 +50,18 @@ describe("SettingsPanel", () => {
     const user = userEvent.setup();
     render(<SettingsPanel />);
     await screen.findByText(
-      "Brak profili. Możesz dodać pierwszy aparat ręcznie.",
+      "No profiles. You can add the first camera manually.",
     );
 
     await user.click(
-      screen.getByRole("button", { name: /Dodaj profil aparatu/ }),
+      screen.getByRole("button", { name: /Add camera profile/ }),
     );
-    const name = screen.getByLabelText("Nazwa profilu");
-    expect(name).toHaveValue("Aparat 1");
+    const name = screen.getByLabelText("Profile name");
+    expect(name).toHaveValue("Camera 1");
     await user.clear(name);
-    expect(screen.getByRole("alert")).toHaveTextContent("musi mieć nazwę");
-    await user.click(screen.getByRole("button", { name: "Usuń profil" }));
-    expect(screen.getByText(/Brak profili/)).toBeInTheDocument();
+    expect(screen.getByRole("alert")).toHaveTextContent("must have a name");
+    await user.click(screen.getByRole("button", { name: "Remove profile" }));
+    expect(screen.getByText(/No profiles/)).toBeInTheDocument();
   });
 
   it("configures background planning, restart behavior and concurrency", async () => {
@@ -76,11 +72,13 @@ describe("SettingsPanel", () => {
     render(<SettingsPanel />);
 
     await user.click(
-      await screen.findByLabelText("Pokaż okno, gdy plan importu jest gotowy"),
+      await screen.findByLabelText(
+        "Show the window when an import plan is ready",
+      ),
     );
-    await user.click(screen.getByLabelText("Powiadomienia systemowe"));
+    await user.click(screen.getByLabelText("System notifications"));
     await user.selectOptions(
-      screen.getByDisplayValue("Zapytaj przed wznowieniem"),
+      screen.getByDisplayValue("Ask before resuming"),
       "automatic",
     );
     const concurrency = screen.getAllByRole("spinbutton")[1];
@@ -88,10 +86,32 @@ describe("SettingsPanel", () => {
     await user.type(concurrency, "3");
 
     expect(
-      screen.getByLabelText("Pokaż okno, gdy plan importu jest gotowy"),
+      screen.getByLabelText("Show the window when an import plan is ready"),
     ).toBeChecked();
-    expect(screen.getByLabelText("Powiadomienia systemowe")).not.toBeChecked();
+    expect(screen.getByLabelText("System notifications")).not.toBeChecked();
     expect(concurrency).toHaveValue(3);
+  });
+
+  it("changes the UI language immediately and persists it with settings", async () => {
+    const saved = vi.fn();
+    mockIPC((command, args) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "save_settings") {
+        const value = (args as Record<string, unknown>).settings as AppSettings;
+        saved(value);
+        return { ...settingsResponseFixture(), settings: value };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SettingsPanel />);
+
+    const language = await screen.findByLabelText("Language");
+    await user.selectOptions(language, "pl");
+
+    expect(screen.getByLabelText("Język")).toHaveValue("pl");
+    await user.click(screen.getByRole("button", { name: "Zapisz ustawienia" }));
+    await waitFor(() => expect(saved).toHaveBeenCalledOnce());
+    expect(saved.mock.calls[0][0].local.uiLanguage).toBe("pl");
   });
 
   it("offers backup recovery after a corrupted primary file", async () => {
@@ -109,10 +129,12 @@ describe("SettingsPanel", () => {
     const user = userEvent.setup();
     render(<SettingsPanel />);
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("uszkodzony");
-    await user.click(screen.getByRole("button", { name: "Przywróć kopię" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent(
+      "Corrupted settings",
+    );
+    await user.click(screen.getByRole("button", { name: "Restore backup" }));
     expect(
-      await screen.findByText("Przywrócono poprzednią wersję ustawień."),
+      await screen.findByText("The previous settings version was restored."),
     ).toBeInTheDocument();
   });
 
@@ -126,12 +148,12 @@ describe("SettingsPanel", () => {
     render(<SettingsPanel />);
 
     await user.click(
-      await screen.findByRole("button", { name: "Wyczyść cache miniaturek" }),
+      await screen.findByRole("button", { name: "Clear thumbnail cache" }),
     );
 
     expect(clear).toHaveBeenCalledOnce();
     expect(
-      await screen.findByText(/Cache miniaturek został wyczyszczony/),
+      await screen.findByText(/thumbnail cache was cleared/),
     ).toBeInTheDocument();
   });
 });

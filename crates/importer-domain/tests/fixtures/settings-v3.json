@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 3,
+  "portable": {
+    "import": {
+      "defaultOperation": "copy",
+      "defaultSourceBehavior": "ask",
+      "eventGapMinutes": 120
+    },
+    "naming": {
+      "folderTemplate": "{year}/{date}-{event_name}",
+      "fileNameTemplate": "{original_name}",
+      "collisionPolicy": "ask"
+    },
+    "cameraProfiles": []
+  },
+  "local": {
+    "libraryPath": null,
+    "startAtLogin": false,
+    "minimizeToTray": true,
+    "sourceBindings": [],
+    "maxConcurrentImports": 2,
+    "resumeAfterRestart": "ask",
+    "showWindowWhenPlanReady": false,
+    "notificationsEnabled": true
+  }
+}

@@ -50,6 +50,20 @@ export interface MediaItem {
   cameraMetadataConflict: boolean;
 }
 
+export interface PhotoUserMetadata {
+  sourceRoot: string;
+  itemKey: string;
+  rating: number;
+  rejected: boolean;
+  rotationDegrees: 0 | 90 | 180 | 270;
+  updatedAtUnixMs: number;
+}
+
+export type PhotoUserMetadataUpdate = Omit<
+  PhotoUserMetadata,
+  "sourceRoot" | "updatedAtUnixMs"
+>;
+
 export interface EventGroup {
   index: number;
   startsAtUnixMs: number;
@@ -91,6 +105,7 @@ export interface PendingSourceWorkflow {
     eventNames: Record<number, string>;
     excludedItemKeys: string[];
     itemProfileAssignments: Record<string, string>;
+    expandedEventIndexes?: number[];
   };
   error: string | null;
   updatedAtUnixMs: number;
@@ -141,6 +156,12 @@ export interface MediaScanJob {
   updatedAtUnixMs: number;
   error: string | null;
   result: SourceScanResponse | null;
+}
+
+export interface StreamedScanItems {
+  scanId: string;
+  path: string;
+  items: MediaItem[];
 }
 
 export interface ThumbnailPayload {
@@ -323,6 +344,10 @@ export function getMediaThumbnail(
   });
 }
 
+export function allowOriginalJpegPreview(path: string): Promise<string> {
+  return invoke<string>("allow_original_jpeg_preview", { path });
+}
+
 export async function clearThumbnailCache(): Promise<void> {
   await invoke<void>("clear_thumbnail_cache");
   window.dispatchEvent(new Event("thumbnail-cache-cleared"));
@@ -338,6 +363,21 @@ export function correctCaptureTimes(
     itemKeys,
     offsetSeconds,
   });
+}
+
+export function listPhotoUserMetadata(
+  sourceRoot: string,
+): Promise<PhotoUserMetadata[]> {
+  return invoke<PhotoUserMetadata[]>("list_photo_user_metadata", {
+    sourceRoot,
+  });
+}
+
+export function savePhotoUserMetadata(
+  sourceRoot: string,
+  updates: PhotoUserMetadataUpdate[],
+): Promise<void> {
+  return invoke<void>("save_photo_user_metadata", { sourceRoot, updates });
 }
 
 export function buildImportPlanPreview(
@@ -395,10 +435,6 @@ export function cancelImportSession(
   mode: "keepCompleted" | "rollbackSession" = "keepCompleted",
 ): Promise<ImportSession> {
   return invoke<ImportSession>("cancel_import_session", { sessionId, mode });
-}
-
-export function getImportSession(sessionId: string): Promise<ImportSession> {
-  return invoke<ImportSession>("get_import_session", { sessionId });
 }
 
 export function listImportSessions(): Promise<ImportSession[]> {

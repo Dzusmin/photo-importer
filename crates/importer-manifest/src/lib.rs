@@ -18,7 +18,7 @@ pub use sessions::{
     NewImportOperation, NewImportSession, OperationStatus, SessionControl, SessionSourceIdentity,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 9;
+const CURRENT_SCHEMA_VERSION: i64 = 10;
 const QUICK_HASH_CHUNK_BYTES: usize = 128 * 1024;
 const PROGRESS_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -89,6 +89,17 @@ pub struct SourceWorkflowRecord {
     pub updated_at_unix_ms: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PhotoUserMetadata {
+    pub source_root: PathBuf,
+    pub item_key: String,
+    pub rating: u8,
+    pub rejected: bool,
+    pub rotation_degrees: u16,
+    pub updated_at_unix_ms: u64,
+}
+
 #[derive(Debug, Error)]
 pub enum ManifestError {
     #[error("cannot prepare manifest directory {path}: {source}")]
@@ -149,6 +160,97 @@ impl ImportManifest {
     #[must_use]
     pub fn database_path(&self) -> &Path {
         &self.database_path
+    }
+
+    pub fn list_photo_user_metadata(
+        &self,
+        source_root: &Path,
+    ) -> Result<Vec<PhotoUserMetadata>, ManifestError> {
+        let connection = self.connection()?;
+        let mut statement = connection.prepare(
+            "SELECT item_key, rating, rejected, rotation_degrees, updated_at_unix_ms
+             FROM photo_user_metadata WHERE source_root = ?1 ORDER BY item_key",
+        )?;
+        statement
+            .query_map([source_root.to_string_lossy().as_ref()], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, i64>(1)?,
+                    row.get::<_, i64>(2)?,
+                    row.get::<_, i64>(3)?,
+                    row.get::<_, i64>(4)?,
+                ))
+            })?
+            .map(|row| {
+                let (item_key, rating, rejected, rotation_degrees, updated_at_unix_ms) = row?;
+                Ok(PhotoUserMetadata {
+                    source_root: source_root.to_path_buf(),
+                    item_key,
+                    rating: u8::try_from(rating).map_err(|_| {
+                        ManifestError::InvalidStoredValue {
+                            field: "photo_user_metadata.rating",
+                            value: rating.to_string(),
+                        }
+                    })?,
+                    rejected: rejected != 0,
+                    rotation_degrees: u16::try_from(rotation_degrees).map_err(|_| {
+                        ManifestError::InvalidStoredValue {
+                            field: "photo_user_metadata.rotation_degrees",
+                            value: rotation_degrees.to_string(),
+                        }
+                    })?,
+                    updated_at_unix_ms: u64::try_from(updated_at_unix_ms).map_err(|_| {
+                        ManifestError::InvalidStoredValue {
+                            field: "photo_user_metadata.updated_at_unix_ms",
+                            value: updated_at_unix_ms.to_string(),
+                        }
+                    })?,
+                })
+            })
+            .collect()
+    }
+
+    pub fn save_photo_user_metadata(
+        &self,
+        records: &[PhotoUserMetadata],
+    ) -> Result<(), ManifestError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        for record in records {
+            if record.rating > 5 {
+                return Err(ManifestError::InvalidStoredValue {
+                    field: "photo_user_metadata.rating",
+                    value: record.rating.to_string(),
+                });
+            }
+            if !matches!(record.rotation_degrees, 0 | 90 | 180 | 270) {
+                return Err(ManifestError::InvalidStoredValue {
+                    field: "photo_user_metadata.rotation_degrees",
+                    value: record.rotation_degrees.to_string(),
+                });
+            }
+            transaction.execute(
+                "INSERT INTO photo_user_metadata (
+                    source_root, item_key, rating, rejected, rotation_degrees,
+                    updated_at_unix_ms
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                 ON CONFLICT(source_root, item_key) DO UPDATE SET
+                    rating = excluded.rating,
+                    rejected = excluded.rejected,
+                    rotation_degrees = excluded.rotation_degrees,
+                    updated_at_unix_ms = excluded.updated_at_unix_ms",
+                params![
+                    record.source_root.to_string_lossy(),
+                    record.item_key,
+                    i64::from(record.rating),
+                    record.rejected,
+                    i64::from(record.rotation_degrees),
+                    to_i64(record.updated_at_unix_ms, "updated_at_unix_ms")?,
+                ],
+            )?;
+        }
+        transaction.commit()?;
+        Ok(())
     }
 
     pub fn record_imports(&self, records: &[ImportedFileRecord]) -> Result<(), ManifestError> {
@@ -870,6 +972,26 @@ fn migrate(connection: &Connection) -> Result<(), ManifestError> {
              ALTER TABLE pending_source_workflows ADD COLUMN settings_revision TEXT NOT NULL DEFAULT '';
              ALTER TABLE pending_source_workflows ADD COLUMN editor_json TEXT NOT NULL DEFAULT '{}';
              PRAGMA user_version = 9;
+             COMMIT;",
+        )?;
+        version = 9;
+    }
+    if version == 9 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE photo_user_metadata (
+                source_root TEXT NOT NULL,
+                item_key TEXT NOT NULL,
+                rating INTEGER NOT NULL DEFAULT 0 CHECK(rating BETWEEN 0 AND 5),
+                rejected INTEGER NOT NULL DEFAULT 0 CHECK(rejected IN (0, 1)),
+                rotation_degrees INTEGER NOT NULL DEFAULT 0
+                    CHECK(rotation_degrees IN (0, 90, 180, 270)),
+                updated_at_unix_ms INTEGER NOT NULL CHECK(updated_at_unix_ms >= 0),
+                PRIMARY KEY(source_root, item_key)
+             );
+             CREATE INDEX photo_user_metadata_source_rating_idx
+                ON photo_user_metadata(source_root, rating, rejected);
+             PRAGMA user_version = 10;
              COMMIT;",
         )?;
     }
