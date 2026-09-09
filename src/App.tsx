@@ -5,6 +5,9 @@ import { SettingsPanel } from "./features/settings/SettingsPanel";
 import { SourceScanner } from "./features/sources/SourceScanner";
 import { BackgroundMonitor } from "./features/background/BackgroundMonitor";
 import { BackupPanel } from "./features/backups/BackupPanel";
+import { PlansPanel } from "./features/plans/PlansPanel";
+import { ImportHistoryPanel } from "./features/history/ImportHistoryPanel";
+import { listImportEvents } from "./shared/sources";
 import {
   describeOperationalError,
   getAppStatusLabel,
@@ -15,7 +18,7 @@ import { useTranslation } from "react-i18next";
 import "./i18n";
 import "./App.css";
 
-type AppView = "home" | "backup" | "activity" | "settings";
+type AppView = "home" | "plans" | "backup" | "activity" | "settings";
 
 function App() {
   const { t } = useTranslation();
@@ -28,6 +31,7 @@ function App() {
     scanner: true,
   });
   const [activeView, setActiveView] = useState<AppView>("home");
+  const [selectedPlanId, setSelectedPlanId] = useState<string | null>(null);
 
   const loadSystemStatus = useCallback(async () => {
     setConnectionState("connecting");
@@ -76,6 +80,10 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    void listImportEvents().catch(() => undefined);
+  }, []);
+
   const appStatus = useMemo<AppStatus>(() => {
     if (connectionState !== "ready") return connectionState;
     return subsystems.monitor && subsystems.scanner ? "ready" : "degraded";
@@ -88,6 +96,11 @@ function App() {
     setSubsystems((current) => ({ ...current, scanner: healthy }));
   }, []);
 
+  const showHome = useCallback(() => {
+    setSelectedPlanId(null);
+    setActiveView("home");
+  }, []);
+
   useEffect(() => {
     const unlisten = listen("open-settings", () => setActiveView("settings"));
     return () => {
@@ -98,12 +111,12 @@ function App() {
   useEffect(() => {
     const unlisten = listen<{ view: "home"; sourcePath: string | null }>(
       "notification-route",
-      () => setActiveView("home"),
+      () => showHome(),
     );
     return () => {
       void unlisten.then((stop) => stop());
     };
-  }, []);
+  }, [showHome]);
 
   const viewCopyKey = `app.views.${activeView}`;
 
@@ -125,7 +138,13 @@ function App() {
             label={t("app.navigation.import")}
             icon="import"
             active={activeView === "home"}
-            onClick={() => setActiveView("home")}
+            onClick={showHome}
+          />
+          <NavButton
+            label={t("app.navigation.plans")}
+            icon="plans"
+            active={activeView === "plans"}
+            onClick={() => setActiveView("plans")}
           />
           <NavButton
             label={t("app.navigation.backup")}
@@ -183,8 +202,29 @@ function App() {
         )}
 
         <div className={`workspace-content workspace-content--${activeView}`}>
+          <div className="persistent-home" hidden={activeView !== "home"}>
+            {activeView === "home" && (
+              <BackgroundMonitor
+                appStatus={appStatus}
+                onHealthChange={reportMonitorHealth}
+                mode="compact"
+              />
+            )}
+            <SourceScanner
+              appStatus={appStatus}
+              onHealthChange={reportScannerHealth}
+              openWorkflowId={selectedPlanId}
+            />
+          </div>
           {activeView === "settings" ? (
             <SettingsPanel />
+          ) : activeView === "plans" ? (
+            <PlansPanel
+              onOpen={(sourceId) => {
+                setSelectedPlanId(sourceId);
+                setActiveView("home");
+              }}
+            />
           ) : activeView === "backup" ? (
             <BackupPanel />
           ) : activeView === "activity" ? (
@@ -193,19 +233,7 @@ function App() {
               status={status}
               onHealthChange={reportMonitorHealth}
             />
-          ) : (
-            <>
-              <BackgroundMonitor
-                appStatus={appStatus}
-                onHealthChange={reportMonitorHealth}
-                mode="compact"
-              />
-              <SourceScanner
-                appStatus={appStatus}
-                onHealthChange={reportScannerHealth}
-              />
-            </>
-          )}
+          ) : null}
         </div>
       </div>
     </main>
@@ -219,7 +247,7 @@ function NavButton({
   onClick,
 }: {
   label: string;
-  icon: "import" | "backup" | "activity" | "settings";
+  icon: "import" | "plans" | "backup" | "activity" | "settings";
   active: boolean;
   onClick: () => void;
 }) {
@@ -241,7 +269,7 @@ function NavButton({
 function NavIcon({
   kind,
 }: {
-  kind: "import" | "backup" | "activity" | "settings";
+  kind: "import" | "plans" | "backup" | "activity" | "settings";
 }) {
   const paths = {
     import: (
@@ -249,6 +277,12 @@ function NavIcon({
         <path d="M12 3v10" />
         <path d="m8 9 4 4 4-4" />
         <path d="M5 17v3h14v-3" />
+      </>
+    ),
+    plans: (
+      <>
+        <path d="M6 4h12v16H6z" />
+        <path d="M9 8h6M9 12h6M9 16h4" />
       </>
     ),
     backup: (
@@ -289,6 +323,7 @@ function ActivityView({
   const { t } = useTranslation();
   return (
     <div className="activity-view">
+      <ImportHistoryPanel />
       <BackgroundMonitor
         appStatus={appStatus}
         onHealthChange={onHealthChange}

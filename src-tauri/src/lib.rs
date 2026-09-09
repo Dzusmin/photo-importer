@@ -5,6 +5,7 @@ use importer_manifest::ImportManifest;
 
 mod background;
 mod backups;
+mod events;
 mod imports;
 mod localization;
 mod scan_jobs;
@@ -22,6 +23,7 @@ use backups::{
     open_backup_directory, pause_backup_job, recognize_backup_target, register_backup_target,
     remove_backup_target, resume_backup_job, start_backup_job, start_backup_planning_job,
 };
+use events::{list_import_events, rename_import_event};
 use imports::{
     ImportService, cancel_import_session, create_import_session, list_import_sessions,
     pause_import_session, retry_import_rollback, start_import_session,
@@ -34,9 +36,10 @@ use settings::{
 };
 use sources::{
     announce_import_plan_ready, build_import_plan_preview, correct_capture_times,
-    delete_pending_source_workflow, ensure_media_source_marker, list_media_sources,
-    list_pending_source_workflows, list_photo_user_metadata, list_source_workflows,
-    save_pending_source_workflow, save_photo_user_metadata,
+    delete_disconnected_source_workflows, delete_pending_source_workflow,
+    ensure_media_source_marker, list_media_sources, list_pending_source_workflows,
+    list_photo_user_metadata, list_source_workflows, save_pending_source_workflow,
+    save_photo_user_metadata,
 };
 use thumbnails::{
     ThumbnailService, allow_original_jpeg_preview, clear_thumbnail_cache, get_media_thumbnail,
@@ -124,6 +127,7 @@ pub fn run() {
             save_pending_source_workflow,
             list_pending_source_workflows,
             delete_pending_source_workflow,
+            delete_disconnected_source_workflows,
             correct_capture_times,
             list_photo_user_metadata,
             save_photo_user_metadata,
@@ -140,6 +144,8 @@ pub fn run() {
             get_media_thumbnail,
             allow_original_jpeg_preview,
             clear_thumbnail_cache,
+            list_import_events,
+            rename_import_event,
             get_background_status,
             refresh_background_monitor,
             acknowledge_pending_source,

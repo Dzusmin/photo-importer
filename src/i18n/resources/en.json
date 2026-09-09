@@ -11,6 +11,7 @@
     "navigationLabel": "Main navigation",
     "navigation": {
       "import": "Import",
+      "plans": "Plans",
       "backup": "Backup",
       "activity": "Activity",
       "settings": "Settings"
@@ -20,6 +21,11 @@
         "eyebrow": "WORKSPACE",
         "title": "Import",
         "description": "Choose a source and prepare photos for your library."
+      },
+      "plans": {
+        "eyebrow": "IMPORT QUEUE",
+        "title": "Plans",
+        "description": "Review and manage saved import plans."
       },
       "backup": {
         "eyebrow": "LIBRARY PROTECTION",
@@ -117,6 +123,23 @@
     "unknown": "The operation could not be completed."
   },
   "settings": {
+    "appearance": {
+      "title": "Appearance",
+      "description": "Choose a comfortable color scheme. The choice is applied immediately on this computer.",
+      "theme": "Theme",
+      "active": "Currently using: {{theme}}",
+      "options": {
+        "system": "System setting",
+        "dark": "Dark",
+        "light": "Light",
+        "high-contrast": "High contrast"
+      },
+      "resolved": {
+        "dark": "dark",
+        "light": "light",
+        "high-contrast": "high contrast"
+      }
+    },
     "language": {
       "label": "Language",
       "description": "Choose the language used by the application."
@@ -174,7 +197,10 @@
     },
     "sourceBehavior": {
       "ask": "Show a notification and ask",
+      "inherit": "Use broader setting",
       "autoPreparePlan": "Prepare a plan automatically",
+      "autoImport": "Scan and start copying automatically (no confirmation)",
+      "autoImportConfirmation": "Automatic import starts copying as soon as an identified card is detected and a conflict-free plan is prepared. Enable it?",
       "ignore": "Ignore"
     },
     "naming": {
@@ -200,6 +226,7 @@
       "model": "EXIF model",
       "serial": "EXIF serial number",
       "timeOffset": "Default time correction (seconds)",
+      "automation": "Automation for this camera",
       "unknownCamera": "Unknown camera"
     },
     "bindings": {

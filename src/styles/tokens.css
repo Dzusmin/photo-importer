@@ -1,0 +1,58 @@
+:root {
+  --workspace-bg: var(--color-canvas);
+  --sidebar-bg: var(--color-sidebar);
+  --panel-bg: var(--color-surface);
+  --panel-raised: var(--color-surface-raised);
+  --panel-soft: var(--color-surface-soft);
+  --line: var(--color-border);
+  --line-strong: var(--color-border-strong);
+  --text: var(--color-text);
+  --text-soft: var(--color-text-soft);
+  --text-muted: var(--color-text-muted);
+  --accent: var(--color-accent);
+  --accent-strong: var(--color-accent-hover);
+  --accent-soft: rgb(var(--color-accent-rgb) / 0.12);
+  --success: var(--color-success);
+  --warning: var(--color-warning);
+  --danger: var(--color-danger);
+  --focus-ring: 0 0 0 3px rgb(var(--color-accent-rgb) / 0.28);
+}
+
+html {
+  accent-color: var(--color-accent);
+}
+
+@media (forced-colors: active) {
+  :root {
+    --color-canvas: Canvas;
+    --color-sidebar: Canvas;
+    --color-surface: Canvas;
+    --color-surface-raised: Canvas;
+    --color-surface-soft: Canvas;
+    --color-surface-subtle: Canvas;
+    --color-control: Field;
+    --color-control-hover: Highlight;
+    --color-border: CanvasText;
+    --color-border-strong: CanvasText;
+    --color-text: CanvasText;
+    --color-text-soft: CanvasText;
+    --color-text-muted: GrayText;
+    --color-accent: Highlight;
+    --color-accent-hover: Highlight;
+    --color-accent-contrast: HighlightText;
+    --color-success: CanvasText;
+    --color-success-text: CanvasText;
+    --color-warning: CanvasText;
+    --color-warning-text: CanvasText;
+    --color-danger: CanvasText;
+    --color-danger-text: CanvasText;
+  }
+
+  button,
+  input,
+  select,
+  [role="status"],
+  [role="alert"] {
+    forced-color-adjust: auto;
+  }
+}

@@ -9,6 +9,7 @@ use importer_manifest::{
     ImportManifest, ImportOperationRecord, ImportSession, ImportSessionOperation,
     ImportSessionStatus, ImportedFileRecord, ManifestError, OperationStatus, hash_file,
 };
+use serde::Serialize;
 use tempfile::TempPath;
 use thiserror::Error;
 
@@ -346,6 +347,7 @@ impl ImportExecutor {
                 event_name: Some(operation.event_name.clone()),
             },
         )?;
+        let _ = write_event_marker(session_id, operation);
         if let Some(source_fingerprint) = session.source_fingerprint.as_deref() {
             let _ = self.manifest.cache_verified_source_file(
                 source_fingerprint,
@@ -401,6 +403,39 @@ impl ImportExecutor {
             .get_import_session(id)?
             .ok_or_else(|| ImportExecutionError::SessionNotFound(id.to_owned()))
     }
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EventMarker<'a> {
+    format_version: u8,
+    event_id: String,
+    session_id: &'a str,
+    event_name: &'a str,
+    folder_name: String,
+}
+
+fn write_event_marker(session_id: &str, operation: &ImportOperationRecord) -> std::io::Result<()> {
+    let Some(folder) = operation.destination_path.parent() else {
+        return Ok(());
+    };
+    let marker_path = folder.join(".photo-importer-event.json");
+    if marker_path.exists() {
+        return Ok(());
+    }
+    let marker = EventMarker {
+        format_version: 1,
+        event_id: format!("{session_id}:{}", operation.event_name),
+        session_id,
+        event_name: &operation.event_name,
+        folder_name: folder
+            .file_name()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .into_owned(),
+    };
+    let contents = serde_json::to_vec_pretty(&marker).map_err(std::io::Error::other)?;
+    std::fs::write(marker_path, contents)
 }
 
 fn copy_to_temporary(

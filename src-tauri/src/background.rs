@@ -5,9 +5,12 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use importer_background::{MonitorChange, SourceSnapshot, resolve_connection};
-use importer_domain::settings::{ResumeAfterRestart, SourceBehavior, SourceIdentity};
-use importer_manifest::{ImportManifest, ImportSessionStatus};
+use importer_domain::settings::{
+    ImportOperation, ResumeAfterRestart, SourceBehavior, SourceIdentity,
+};
+use importer_manifest::{ImportManifest, ImportSessionStatus, SessionSourceIdentity};
 use importer_media::{SourceDiscovery, SystemSourceDiscovery};
+use importer_plan::{ImportPlan, ImportPlanStatus};
 use serde::Serialize;
 use tauri::menu::{Menu, MenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
@@ -15,7 +18,9 @@ use tauri::{Emitter, Manager};
 use tauri_plugin_autostart::ManagerExt;
 use tauri_plugin_notification::NotificationExt;
 
-use crate::imports::{ImportService, session_source_matches};
+use crate::imports::{
+    CreateSessionRequest, ImportService, create_import_session_internal, session_source_matches,
+};
 use crate::localization::{
     NativeText as Nt, app_language, app_text, card_ready, imported_file_count, plan_file_count,
     scan_result, text,
@@ -93,6 +98,7 @@ enum BackgroundEventKind {
 struct AutoScanContext {
     profile_name: String,
     source_path: PathBuf,
+    auto_import: bool,
 }
 
 #[derive(Debug)]
@@ -624,24 +630,29 @@ fn poll_sources(
                         .retain(|source| source.fingerprint != volume.fingerprint);
                 });
                 let manifest = app.state::<ImportManifest>();
+                let source_id = crate::sources::source_workflow_id(&volume);
                 let existing = manifest.list_source_workflows().ok().and_then(|workflows| {
                     workflows
                         .into_iter()
-                        .find(|workflow| workflow.source_root == volume.mount_path)
+                        .find(|workflow| workflow.source_id == source_id)
                 });
                 if existing
                     .as_ref()
                     .is_some_and(|workflow| workflow.state == "planReady")
                 {
                     let _ = manifest.update_source_workflow_state(
-                        &volume.mount_path,
+                        &source_id,
                         "disconnected",
                         Some(text(language, Nt::CardDisconnectedWorkflow)),
                         now_unix_ms(),
                     );
-                } else {
-                    let _ = manifest.delete_pending_workflow(&volume.mount_path);
+                } else if !existing
+                    .as_ref()
+                    .is_some_and(|workflow| workflow.state == "failedRecoverable")
+                {
+                    let _ = manifest.delete_pending_workflow(&source_id);
                 }
+                let _ = app.emit("source-workflows-invalidated", source_id);
                 push_event(
                     status,
                     BackgroundEventKind::SourceDisconnected,
@@ -654,6 +665,29 @@ fn poll_sources(
             MonitorChange::Connected(connection) => {
                 let path = connection.volume.mount_path.clone();
                 let profile = connection.profile_name.clone();
+                let source_id = crate::sources::source_workflow_id(&connection.volume);
+                let restored_plan = app
+                    .state::<ImportManifest>()
+                    .list_source_workflows()
+                    .ok()
+                    .and_then(|workflows| {
+                        workflows
+                            .into_iter()
+                            .find(|workflow| workflow.source_id == source_id)
+                    })
+                    .is_some_and(|workflow| workflow.state == "disconnected");
+                if restored_plan {
+                    let _ = app
+                        .state::<ImportManifest>()
+                        .update_source_workflow_connection(
+                            &source_id,
+                            &path,
+                            "planReady",
+                            None,
+                            now_unix_ms(),
+                        );
+                    let _ = app.emit("source-workflows-invalidated", source_id.clone());
+                }
                 push_event(
                     status,
                     BackgroundEventKind::SourceConnected,
@@ -694,6 +728,9 @@ fn poll_sources(
                         }
                     }
                 }
+                if restored_plan {
+                    continue;
+                }
                 match connection.behavior {
                     SourceBehavior::Ask => {
                         update_status(status, |state| {
@@ -724,7 +761,19 @@ fn poll_sources(
                         );
                     }
                     SourceBehavior::AutoPreparePlan => {
-                        start_automatic_scan(app, status, scans, path, profile);
+                        start_automatic_scan(app, status, scans, path, profile, false);
+                    }
+                    SourceBehavior::AutoImport => {
+                        if connection.volume.marker_uuid.is_some() {
+                            start_automatic_scan(app, status, scans, path, profile, true);
+                        } else {
+                            persist_volume_state(
+                                app,
+                                &connection.volume,
+                                SourceWorkflowState::FailedRecoverable,
+                                Some("Automatyczny import wymaga identyfikatora UUID zapisanego na karcie.".to_owned()),
+                            );
+                        }
                     }
                     SourceBehavior::Ignore => {}
                 }
@@ -743,6 +792,7 @@ fn start_automatic_scan(
     scans: &mut HashMap<String, AutoScanContext>,
     source_path: PathBuf,
     profile_name: String,
+    auto_import: bool,
 ) {
     let language = app_language(app);
     if let Some(volume) = SystemSourceDiscovery
@@ -767,6 +817,7 @@ fn start_automatic_scan(
             scans.entry(scan_id.clone()).or_insert(AutoScanContext {
                 profile_name: profile_name.clone(),
                 source_path: source_path.clone(),
+                auto_import,
             });
             push_event(
                 status,
@@ -819,9 +870,12 @@ fn finish_auto_scans(
                     BackgroundEventKind::ScanCompleted,
                     text(language, Nt::AutoScanCompleted),
                     detail,
-                    Some(context.source_path),
+                    Some(context.source_path.clone()),
                     Some(id),
                 );
+                if context.auto_import {
+                    start_automatic_import(app, &context.source_path, job.result());
+                }
             }
             MediaScanJobStatus::Failed | MediaScanJobStatus::Cancelled => {
                 let detail = if job.status() == MediaScanJobStatus::Cancelled {
@@ -855,6 +909,99 @@ fn finish_auto_scans(
     }
 }
 
+fn start_automatic_import(
+    app: &tauri::AppHandle,
+    source_path: &std::path::Path,
+    scan: Option<&crate::sources::SourceScanResponse>,
+) {
+    let Some(volume) = SystemSourceDiscovery
+        .discover()
+        .into_iter()
+        .find(|volume| volume.mount_path == source_path)
+    else {
+        return;
+    };
+    let source_id = crate::sources::source_workflow_id(&volume);
+    let manifest = app.state::<ImportManifest>();
+    let Some(record) = manifest.list_source_workflows().ok().and_then(|records| {
+        records
+            .into_iter()
+            .find(|record| record.source_id == source_id)
+    }) else {
+        return;
+    };
+    let plan = serde_json::from_str::<Option<ImportPlan>>(&record.plan_json)
+        .ok()
+        .flatten();
+    let settings_service = app.state::<SettingsService>();
+    let settings = settings_service.current_settings().ok();
+    let blocking_reason = if volume.marker_uuid.is_none() {
+        Some("Automatyczny import wymaga jednoznacznego identyfikatora UUID karty.")
+    } else if settings
+        .as_ref()
+        .is_some_and(|settings| settings.portable.import.default_operation != ImportOperation::Copy)
+    {
+        Some("Automatyczne przenoszenie plików wymaga ręcznego potwierdzenia.")
+    } else if plan.as_ref().is_none_or(|plan| {
+        plan.status != ImportPlanStatus::Ready || !plan.conflicts.is_empty() || plan.file_count == 0
+    }) {
+        Some("Plan zawiera konflikt lub wymaga decyzji użytkownika.")
+    } else if scan.is_none() {
+        Some("Wynik skanowania jest niedostępny.")
+    } else {
+        None
+    };
+    if let Some(reason) = blocking_reason {
+        let _ = manifest.update_source_workflow_state(
+            &source_id,
+            "failedRecoverable",
+            Some(reason),
+            now_unix_ms(),
+        );
+        let _ = app.emit("source-workflows-invalidated", source_id);
+        return;
+    }
+    let Some(plan) = plan else { return };
+    let service = app.state::<ImportService>();
+    let session = create_import_session_internal(
+        CreateSessionRequest {
+            plan,
+            source_fingerprint: Some(volume.fingerprint.clone()),
+            source_identity: Some(SessionSourceIdentity {
+                marker_uuid: volume.marker_uuid,
+                platform_volume_id: volume.platform_volume_id.clone(),
+                fallback_fingerprint: volume.fingerprint.clone(),
+            }),
+            confirm_move: false,
+        },
+        &settings_service,
+        &service,
+    );
+    match session {
+        Ok(session) => {
+            let max_concurrent = settings.map_or(1, |settings| {
+                usize::from(settings.local.max_concurrent_imports)
+            });
+            if service
+                .launch(session.id.clone(), app.clone(), max_concurrent)
+                .is_ok()
+            {
+                let _ = manifest.delete_pending_workflow(&source_id);
+                let _ = app.emit("source-workflows-invalidated", source_id);
+            }
+        }
+        Err(error) => {
+            let _ = manifest.update_source_workflow_state(
+                &source_id,
+                "failedRecoverable",
+                Some(&error.message),
+                now_unix_ms(),
+            );
+            let _ = app.emit("source-workflows-invalidated", source_id);
+        }
+    }
+}
+
 fn persist_volume_state(
     app: &tauri::AppHandle,
     volume: &importer_media::SourceVolume,
@@ -862,9 +1009,7 @@ fn persist_volume_state(
     error: Option<String>,
 ) {
     let workflow = PendingSourceWorkflow {
-        source_id: volume
-            .marker_uuid
-            .map_or_else(|| volume.fingerprint.clone(), |id| id.to_string()),
+        source_id: crate::sources::source_workflow_id(volume),
         source_root: volume.mount_path.clone(),
         source_identity: Some(SourceIdentity {
             marker_uuid: volume.marker_uuid,

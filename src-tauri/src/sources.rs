@@ -226,11 +226,13 @@ pub(crate) fn save_pending_source_workflow(
     mut workflow: PendingSourceWorkflow,
     manifest: tauri::State<'_, importer_manifest::ImportManifest>,
 ) -> Result<(), SourceCommandError> {
+    workflow.source_id =
+        canonical_workflow_source_id(&workflow.source_id, workflow.source_identity.as_ref());
     if let Some(existing) = manifest
         .list_source_workflows()
         .map_err(|error| SourceCommandError::new("workflowLoadFailed", error.to_string()))?
         .into_iter()
-        .find(|record| record.source_root == workflow.source_root)
+        .find(|record| record.source_id == workflow.source_id)
     {
         if workflow.source_identity.is_none() {
             workflow.source_identity = existing
@@ -255,9 +257,6 @@ pub(crate) fn save_pending_source_workflow(
             workflow.editor = serde_json::from_str(&existing.editor_json).unwrap_or_default();
         }
     }
-    if workflow.source_id.is_empty() {
-        workflow.source_id = workflow.source_root.to_string_lossy().into_owned();
-    }
     if workflow.display_name.is_empty() {
         workflow.display_name = workflow
             .source_root
@@ -281,6 +280,7 @@ pub(crate) fn save_pending_source_workflow(
         .map_err(|error| SourceCommandError::new("workflowSerializeFailed", error.to_string()))?;
     manifest
         .save_source_workflow(&SourceWorkflowRecord {
+            source_id: workflow.source_id,
             source_root: workflow.source_root,
             state: workflow_state_name(workflow.state).to_owned(),
             source_identity_json: identity_json,
@@ -305,10 +305,42 @@ pub(crate) fn list_pending_source_workflows(
     let mut records = manifest
         .list_source_workflows()
         .map_err(|error| SourceCommandError::new("workflowLoadFailed", error.to_string()))?;
+    let connected_sources = SystemSourceDiscovery
+        .discover()
+        .into_iter()
+        .map(|volume| (source_workflow_id(&volume), volume.mount_path))
+        .collect::<HashMap<_, _>>();
 
     let mut reconciled = Vec::with_capacity(records.len());
     for mut record in records.drain(..) {
-        if record.source_root.try_exists().unwrap_or(true) {
+        // A manually selected directory or network share has an explicit path-based
+        // identity. It is not a removable-volume workflow and must not be reconciled
+        // against the currently detected cards.
+        if record.source_id.starts_with("directory:") {
+            reconciled.push(record);
+            continue;
+        }
+        if let Some(current_root) = connected_sources.get(&record.source_id) {
+            if record.source_root != *current_root || record.state == "disconnected" {
+                let state = if record.state == "disconnected" {
+                    "planReady"
+                } else {
+                    record.state.as_str()
+                };
+                manifest
+                    .update_source_workflow_connection(
+                        &record.source_id,
+                        current_root,
+                        state,
+                        record.error.as_deref(),
+                        now_unix_ms(),
+                    )
+                    .map_err(|error| {
+                        SourceCommandError::new("workflowSaveFailed", error.to_string())
+                    })?;
+                record.source_root = current_root.clone();
+                record.state = state.to_owned();
+            }
             reconciled.push(record);
             continue;
         }
@@ -318,7 +350,7 @@ pub(crate) fn list_pending_source_workflows(
             MissingWorkflowAction::MarkDisconnected => {
                 manifest
                     .update_source_workflow_state(
-                        &record.source_root,
+                        &record.source_id,
                         "disconnected",
                         record.error.as_deref(),
                         now_unix_ms(),
@@ -331,7 +363,7 @@ pub(crate) fn list_pending_source_workflows(
             }
             MissingWorkflowAction::Delete => {
                 manifest
-                    .delete_pending_workflow(&record.source_root)
+                    .delete_pending_workflow(&record.source_id)
                     .map_err(|error| {
                         SourceCommandError::new("workflowDeleteFailed", error.to_string())
                     })?;
@@ -343,10 +375,7 @@ pub(crate) fn list_pending_source_workflows(
         .into_iter()
         .map(|record| {
             Ok(PendingSourceWorkflow {
-                source_id: record
-                    .source_identity_json
-                    .clone()
-                    .unwrap_or_else(|| record.source_root.to_string_lossy().into_owned()),
+                source_id: record.source_id,
                 source_root: record.source_root,
                 source_identity: record
                     .source_identity_json
@@ -384,14 +413,14 @@ enum MissingWorkflowAction {
 fn missing_workflow_action(state: &str) -> MissingWorkflowAction {
     match state {
         "planReady" => MissingWorkflowAction::MarkDisconnected,
-        "disconnected" => MissingWorkflowAction::Keep,
+        "disconnected" | "failedRecoverable" => MissingWorkflowAction::Keep,
         _ => MissingWorkflowAction::Delete,
     }
 }
 
 #[cfg(test)]
 mod workflow_reconciliation_tests {
-    use super::{MissingWorkflowAction, missing_workflow_action};
+    use super::{MissingWorkflowAction, canonical_workflow_source_id, missing_workflow_action};
 
     #[test]
     fn removes_an_unfinished_decision_for_a_missing_source() {
@@ -410,6 +439,18 @@ mod workflow_reconciliation_tests {
         assert_eq!(
             missing_workflow_action("disconnected"),
             MissingWorkflowAction::Keep
+        );
+    }
+
+    #[test]
+    fn preserves_the_explicit_manual_directory_source_model() {
+        assert_eq!(
+            canonical_workflow_source_id("directory:C:\\Photos", None),
+            "directory:C:\\Photos"
+        );
+        assert_eq!(
+            canonical_workflow_source_id("E:\\", None),
+            "unverified:E:\\"
         );
     }
 }
@@ -437,6 +478,7 @@ pub(crate) fn persist_workflow(
         .map_err(|error| SourceCommandError::new("workflowSerializeFailed", error.to_string()))?;
     manifest
         .save_source_workflow(&SourceWorkflowRecord {
+            source_id: workflow.source_id.clone(),
             source_root: workflow.source_root.clone(),
             state: workflow_state_name(workflow.state).to_owned(),
             source_identity_json,
@@ -528,10 +570,7 @@ pub(crate) fn prepare_automatic_workflow(
         );
     }
     let mut workflow = PendingSourceWorkflow {
-        source_id: binding.map_or_else(
-            || volume.fingerprint.clone(),
-            |binding| binding.id.to_string(),
-        ),
+        source_id: source_workflow_id(volume),
         source_root: volume.mount_path.clone(),
         source_identity: Some(identity),
         display_name: binding.map_or_else(
@@ -548,7 +587,7 @@ pub(crate) fn prepare_automatic_workflow(
             event_names: response
                 .events
                 .iter()
-                .map(|event| (event.index, format!("wydarzenie-{}", event.index + 1)))
+                .map(|event| (event.index, default_event_name(event.index)))
                 .collect(),
             excluded_item_keys: response
                 .import_matches
@@ -580,7 +619,7 @@ pub(crate) fn prepare_automatic_workflow(
         .iter()
         .cloned()
         .map(|event| EventPlanInput {
-            name: format!("wydarzenie-{}", event.index + 1),
+            name: default_event_name(event.index),
             event,
         })
         .collect();
@@ -602,6 +641,10 @@ pub(crate) fn prepare_automatic_workflow(
     workflow.plan = Some(plan);
     workflow.state = SourceWorkflowState::PlanReady;
     Ok(workflow)
+}
+
+fn default_event_name(index: usize) -> String {
+    format!("wydarzenie-{index:02}")
 }
 
 fn profile_match_score(
@@ -674,12 +717,56 @@ fn parse_workflow_state(value: &str) -> Result<SourceWorkflowState, SourceComman
 
 #[tauri::command]
 pub(crate) fn delete_pending_source_workflow(
-    source_root: PathBuf,
+    source_id: String,
     manifest: tauri::State<'_, importer_manifest::ImportManifest>,
 ) -> Result<(), SourceCommandError> {
     manifest
-        .delete_pending_workflow(&source_root)
+        .delete_pending_workflow(&source_id)
         .map_err(|error| SourceCommandError::new("workflowDeleteFailed", error.to_string()))
+}
+
+#[tauri::command]
+pub(crate) fn delete_disconnected_source_workflows(
+    manifest: tauri::State<'_, importer_manifest::ImportManifest>,
+) -> Result<usize, SourceCommandError> {
+    let records = manifest
+        .list_source_workflows()
+        .map_err(|error| SourceCommandError::new("workflowLoadFailed", error.to_string()))?;
+    let disconnected = records
+        .into_iter()
+        .filter(|record| record.state == "disconnected")
+        .collect::<Vec<_>>();
+    for record in &disconnected {
+        manifest
+            .delete_pending_workflow(&record.source_id)
+            .map_err(|error| SourceCommandError::new("workflowDeleteFailed", error.to_string()))?;
+    }
+    Ok(disconnected.len())
+}
+
+pub(crate) fn source_workflow_id(volume: &SourceVolume) -> String {
+    volume.marker_uuid.map_or_else(
+        || format!("unverified:{}", volume.fingerprint),
+        |id| format!("marker:{id}"),
+    )
+}
+
+fn canonical_workflow_source_id(source_id: &str, identity: Option<&SourceIdentity>) -> String {
+    identity
+        .and_then(|identity| identity.marker_uuid)
+        .map_or_else(
+            || {
+                if source_id.starts_with("unverified:") || source_id.starts_with("directory:") {
+                    source_id.to_owned()
+                } else {
+                    identity.map_or_else(
+                        || format!("unverified:{source_id}"),
+                        |identity| format!("unverified:{}", identity.fallback_fingerprint),
+                    )
+                }
+            },
+            |id| format!("marker:{id}"),
+        )
 }
 
 fn now_unix_ms() -> u64 {
@@ -881,5 +968,11 @@ mod tests {
         .expect("older editor state should remain readable");
 
         assert!(editor.expanded_event_indexes.is_empty());
+    }
+
+    #[test]
+    fn default_event_names_use_the_one_based_event_index() {
+        assert_eq!(default_event_name(1), "wydarzenie-01");
+        assert_eq!(default_event_name(12), "wydarzenie-12");
     }
 }

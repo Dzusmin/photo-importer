@@ -14,6 +14,7 @@ import {
   type AppStatus,
 } from "../../shared/appStatus";
 import { ErrorNotice } from "../../shared/ErrorNotice";
+import { activeIntlLocale, localize } from "../../i18n";
 
 const ignoreHealthChange = () => undefined;
 
@@ -88,32 +89,55 @@ export function BackgroundMonitor({
           className={`automation-dot ${status?.running ? "automation-dot--active" : ""}`}
         />
         <div>
-          <p className="section-label">AUTOMAT W TLE</p>
+          <p className="section-label">
+            {localize("BACKGROUND AUTOMATION", "AUTOMAT W TLE")}
+          </p>
           <strong>
             {appStatus === "connecting"
-              ? "Łączenie…"
+              ? localize("Connecting…", "Łączenie…")
               : appStatus === "error"
-                ? "Monitor niedostępny"
+                ? localize("Monitor unavailable", "Monitor niedostępny")
                 : status?.activeAutoScanCount
-                  ? `Skanowanie ${status.activeAutoScanCount} źródła`
+                  ? localize(
+                      `Scanning ${status.activeAutoScanCount} source(s)`,
+                      `Skanowanie ${status.activeAutoScanCount} źródła`,
+                    )
                   : status?.running && status.lastError
-                    ? "Monitor działa z ograniczeniami"
+                    ? localize(
+                        "Monitor has limited functionality",
+                        "Monitor działa z ograniczeniami",
+                      )
                     : status?.running
-                      ? "Monitor nośników działa"
+                      ? localize(
+                          "Media monitor is running",
+                          "Monitor nośników działa",
+                        )
                       : status
-                        ? "Monitor jest zatrzymany"
-                        : "Sprawdzanie monitora…"}
+                        ? localize(
+                            "Monitor is stopped",
+                            "Monitor jest zatrzymany",
+                          )
+                        : localize(
+                            "Checking monitor…",
+                            "Sprawdzanie monitora…",
+                          )}
           </strong>
           <small>
             {status
-              ? `${status.connectedKnownSourceCount} znanych nośników · ostatnia kontrola ${formatTime(status.lastCheckedAtUnixMs)}`
-              : "Odczytywanie stanu…"}
+              ? localize(
+                  `${status.connectedKnownSourceCount} known media · last checked ${formatTime(status.lastCheckedAtUnixMs)}`,
+                  `${status.connectedKnownSourceCount} znanych nośników · ostatnia kontrola ${formatTime(status.lastCheckedAtUnixMs)}`,
+                )
+              : localize("Reading status…", "Odczytywanie stanu…")}
           </small>
         </div>
       </div>
       <div className="background-monitor__actions">
         <span className={status?.startAtLoginEnabled ? "status-on" : undefined}>
-          Autostart: {status?.startAtLoginEnabled ? "włączony" : "wyłączony"}
+          {localize("Autostart", "Autostart")}:{" "}
+          {status?.startAtLoginEnabled
+            ? localize("on", "włączony")
+            : localize("off", "wyłączony")}
         </span>
         <button
           type="button"
@@ -123,7 +147,9 @@ export function BackgroundMonitor({
           }
           onClick={() => void refresh()}
         >
-          {refreshing ? "Sprawdzanie…" : "Sprawdź teraz"}
+          {refreshing
+            ? localize("Checking…", "Sprawdzanie…")
+            : localize("Check now", "Sprawdź teraz")}
         </button>
       </div>
       {mode === "full" && loadError !== null && (
@@ -143,11 +169,19 @@ export function BackgroundMonitor({
           <div className="background-monitor__event" key={source.fingerprint}>
             <span>SD</span>
             <div>
-              <strong>{source.name} czeka na decyzję</strong>
+              <strong>
+                {localize(
+                  `${source.name} is waiting for a decision`,
+                  `${source.name} czeka na decyzję`,
+                )}
+              </strong>
               <small>{source.sourcePath}</small>
               {source.probableMatch && (
                 <small>
-                  Tożsamość karty zmieniła się — wymagane potwierdzenie.
+                  {localize(
+                    "The card identity has changed — confirmation is required.",
+                    "Tożsamość karty zmieniła się — wymagane potwierdzenie.",
+                  )}
                 </small>
               )}
             </div>
@@ -160,7 +194,7 @@ export function BackgroundMonitor({
                 );
               }}
             >
-              Skanuj i przygotuj plan
+              {localize("Scan and prepare plan", "Skanuj i przygotuj plan")}
             </button>
             <button
               type="button"
@@ -171,14 +205,17 @@ export function BackgroundMonitor({
                 )
               }
             >
-              Tym razem ignoruj
+              {localize("Ignore this time", "Tym razem ignoruj")}
             </button>
             <button
               type="button"
               className="ghost"
               onClick={() => void emit("open-settings")}
             >
-              Zmień zachowanie tej karty
+              {localize(
+                "Change behavior for this card",
+                "Zmień zachowanie tej karty",
+              )}
             </button>
           </div>
         ))}
@@ -197,8 +234,8 @@ export function BackgroundMonitor({
 }
 
 function formatTime(timestamp: number | null): string {
-  if (!timestamp) return "jeszcze nie wykonano";
-  return new Intl.DateTimeFormat("pl-PL", {
+  if (!timestamp) return localize("not checked yet", "jeszcze nie wykonano");
+  return new Intl.DateTimeFormat(activeIntlLocale(), {
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",

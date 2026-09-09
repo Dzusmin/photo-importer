@@ -4,6 +4,7 @@ import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { backgroundStatusFixture } from "../../test/fixtures";
 import { BackgroundMonitor } from "./BackgroundMonitor";
+import { setAppLanguage } from "../../i18n";
 
 const eventBus = vi.hoisted(
   () => new Map<string, Set<(event: unknown) => void>>(),
@@ -29,7 +30,10 @@ async function emit(name: string, payload: unknown) {
 }
 
 describe("BackgroundMonitor", () => {
-  beforeEach(() => eventBus.clear());
+  beforeEach(async () => {
+    eventBus.clear();
+    await setAppLanguage("pl");
+  });
   it("shows runtime state and reacts to backend events", async () => {
     mockIPC((command) => {
       if (command === "get_background_status") {

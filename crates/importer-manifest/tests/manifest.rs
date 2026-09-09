@@ -96,7 +96,7 @@ fn same_size_with_different_content_is_new() {
 }
 
 #[test]
-fn database_uses_schema_version_ten() {
+fn database_uses_schema_version_eleven() {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("manifest.sqlite3");
     ImportManifest::open(&path).unwrap();
@@ -105,7 +105,7 @@ fn database_uses_schema_version_ten() {
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
 
-    assert_eq!(version, 10);
+    assert_eq!(version, 11);
 }
 
 #[test]
@@ -567,7 +567,9 @@ fn pending_source_workflow_survives_reopening_and_can_be_removed() {
     let workflows = reopened.list_pending_workflows().unwrap();
     assert_eq!(workflows.len(), 1);
     assert_eq!(workflows[0].0, source);
-    reopened.delete_pending_workflow(&source).unwrap();
+    reopened
+        .delete_pending_workflow(&source.to_string_lossy())
+        .unwrap();
     assert!(reopened.list_pending_workflows().unwrap().is_empty());
 }
 
@@ -577,6 +579,7 @@ fn complete_source_workflow_survives_reopening() {
     let database = directory.path().join("manifest.sqlite3");
     let source = directory.path().join("card");
     let expected = SourceWorkflowRecord {
+        source_id: "marker:3d42ad77-6669-438e-8727-6b017a68dbf3".into(),
         source_root: source.clone(),
         state: "planReady".into(),
         source_identity_json: Some(
@@ -602,4 +605,37 @@ fn complete_source_workflow_survives_reopening() {
         .unwrap();
 
     assert_eq!(restored, vec![expected]);
+}
+
+#[test]
+fn source_workflows_are_distinguished_by_card_id_not_mount_path() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();
+    let source_root = std::path::PathBuf::from("E:\\");
+    for source_id in ["marker:card-a", "marker:card-b"] {
+        manifest
+            .save_source_workflow(&SourceWorkflowRecord {
+                source_id: source_id.into(),
+                source_root: source_root.clone(),
+                state: "disconnected".into(),
+                source_identity_json: None,
+                display_name: source_id.into(),
+                scan_json: String::new(),
+                plan_json: String::new(),
+                settings_schema_version: 4,
+                settings_revision: String::new(),
+                editor_json: "{}".into(),
+                error: None,
+                updated_at_unix_ms: 1,
+            })
+            .unwrap();
+    }
+
+    let restored = manifest.list_source_workflows().unwrap();
+    assert_eq!(restored.len(), 2);
+    assert!(
+        restored
+            .iter()
+            .all(|workflow| workflow.source_root == source_root)
+    );
 }

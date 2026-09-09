@@ -18,7 +18,7 @@ pub use sessions::{
     NewImportOperation, NewImportSession, OperationStatus, SessionControl, SessionSourceIdentity,
 };
 
-const CURRENT_SCHEMA_VERSION: i64 = 10;
+const CURRENT_SCHEMA_VERSION: i64 = 11;
 const QUICK_HASH_CHUNK_BYTES: usize = 128 * 1024;
 const PROGRESS_REPORT_BYTES: u64 = 16 * 1024 * 1024;
 
@@ -76,6 +76,7 @@ pub struct ImportedFileRecord {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceWorkflowRecord {
+    pub source_id: String,
     pub source_root: PathBuf,
     pub state: String,
     pub source_identity_json: Option<String>,
@@ -465,6 +466,7 @@ impl ImportManifest {
         updated_at_unix_ms: u64,
     ) -> Result<(), ManifestError> {
         self.save_source_workflow(&SourceWorkflowRecord {
+            source_id: source_root.to_string_lossy().into_owned(),
             source_root: source_root.to_path_buf(),
             state: "planReady".to_owned(),
             source_identity_json: None,
@@ -489,11 +491,12 @@ impl ImportManifest {
     ) -> Result<(), ManifestError> {
         self.connection()?.execute(
             "INSERT INTO pending_source_workflows (
-                source_root, scan_json, plan_json, updated_at_unix_ms, state,
+                source_id, source_root, scan_json, plan_json, updated_at_unix_ms, state,
                 source_identity_json, display_name, settings_schema_version,
                 settings_revision, editor_json, error
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)
-             ON CONFLICT(source_root) DO UPDATE SET scan_json = excluded.scan_json,
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12)
+             ON CONFLICT(source_id) DO UPDATE SET source_root = excluded.source_root,
+             scan_json = excluded.scan_json,
              plan_json = excluded.plan_json, updated_at_unix_ms = excluded.updated_at_unix_ms,
              state = excluded.state, source_identity_json = excluded.source_identity_json,
              display_name = excluded.display_name,
@@ -501,6 +504,7 @@ impl ImportManifest {
              settings_revision = excluded.settings_revision,
              editor_json = excluded.editor_json, error = excluded.error",
             params![
+                workflow.source_id,
                 workflow.source_root.to_string_lossy(),
                 workflow.scan_json,
                 workflow.plan_json,
@@ -528,7 +532,7 @@ impl ImportManifest {
     pub fn list_source_workflows(&self) -> Result<Vec<SourceWorkflowRecord>, ManifestError> {
         let connection = self.connection()?;
         let mut statement = connection.prepare(
-            "SELECT source_root, state, source_identity_json, display_name, scan_json,
+            "SELECT source_id, source_root, state, source_identity_json, display_name, scan_json,
                     plan_json, settings_schema_version, settings_revision, editor_json,
                     error, updated_at_unix_ms
              FROM pending_source_workflows ORDER BY updated_at_unix_ms DESC",
@@ -538,39 +542,41 @@ impl ImportManifest {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<String>>(2)?,
-                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, Option<String>>(3)?,
                     row.get::<_, String>(4)?,
                     row.get::<_, String>(5)?,
-                    row.get::<_, i64>(6)?,
-                    row.get::<_, String>(7)?,
+                    row.get::<_, String>(6)?,
+                    row.get::<_, i64>(7)?,
                     row.get::<_, String>(8)?,
-                    row.get::<_, Option<String>>(9)?,
-                    row.get::<_, i64>(10)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, Option<String>>(10)?,
+                    row.get::<_, i64>(11)?,
                 ))
             })?
             .map(|row| {
                 let row = row?;
                 Ok(SourceWorkflowRecord {
-                    source_root: row.0.into(),
-                    state: row.1,
-                    source_identity_json: row.2,
-                    display_name: row.3,
-                    scan_json: row.4,
-                    plan_json: row.5,
-                    settings_schema_version: u32::try_from(row.6).map_err(|_| {
+                    source_id: row.0,
+                    source_root: row.1.into(),
+                    state: row.2,
+                    source_identity_json: row.3,
+                    display_name: row.4,
+                    scan_json: row.5,
+                    plan_json: row.6,
+                    settings_schema_version: u32::try_from(row.7).map_err(|_| {
                         ManifestError::InvalidStoredValue {
                             field: "workflow.settings_schema_version",
-                            value: row.6.to_string(),
+                            value: row.7.to_string(),
                         }
                     })?,
-                    settings_revision: row.7,
-                    editor_json: row.8,
-                    error: row.9,
-                    updated_at_unix_ms: u64::try_from(row.10).map_err(|_| {
+                    settings_revision: row.8,
+                    editor_json: row.9,
+                    error: row.10,
+                    updated_at_unix_ms: u64::try_from(row.11).map_err(|_| {
                         ManifestError::InvalidStoredValue {
                             field: "workflow.updated_at_unix_ms",
-                            value: row.10.to_string(),
+                            value: row.11.to_string(),
                         }
                     })?,
                 })
@@ -578,17 +584,17 @@ impl ImportManifest {
             .collect()
     }
 
-    pub fn delete_pending_workflow(&self, source_root: &Path) -> Result<(), ManifestError> {
+    pub fn delete_pending_workflow(&self, source_id: &str) -> Result<(), ManifestError> {
         self.connection()?.execute(
-            "DELETE FROM pending_source_workflows WHERE source_root = ?1",
-            [source_root.to_string_lossy()],
+            "DELETE FROM pending_source_workflows WHERE source_id = ?1",
+            [source_id],
         )?;
         Ok(())
     }
 
     pub fn update_source_workflow_state(
         &self,
-        source_root: &Path,
+        source_id: &str,
         state: &str,
         error: Option<&str>,
         updated_at_unix_ms: u64,
@@ -596,8 +602,31 @@ impl ImportManifest {
         self.connection()?
             .execute(
                 "UPDATE pending_source_workflows SET state = ?2, error = ?3,
-             updated_at_unix_ms = ?4 WHERE source_root = ?1",
+             updated_at_unix_ms = ?4 WHERE source_id = ?1",
                 params![
+                    source_id,
+                    state,
+                    error,
+                    to_i64(updated_at_unix_ms, "updated_at_unix_ms")?
+                ],
+            )
+            .map_err(Into::into)
+    }
+
+    pub fn update_source_workflow_connection(
+        &self,
+        source_id: &str,
+        source_root: &Path,
+        state: &str,
+        error: Option<&str>,
+        updated_at_unix_ms: u64,
+    ) -> Result<usize, ManifestError> {
+        self.connection()?
+            .execute(
+                "UPDATE pending_source_workflows SET source_root = ?2, state = ?3,
+                 error = ?4, updated_at_unix_ms = ?5 WHERE source_id = ?1",
+                params![
+                    source_id,
                     source_root.to_string_lossy(),
                     state,
                     error,
@@ -605,6 +634,56 @@ impl ImportManifest {
                 ],
             )
             .map_err(Into::into)
+    }
+
+    pub fn rename_import_event_paths(
+        &self,
+        session_id: &str,
+        old_event_name: &str,
+        new_event_name: &str,
+        old_folder: &Path,
+        new_folder: &Path,
+    ) -> Result<(), ManifestError> {
+        let mut connection = self.connection()?;
+        let transaction = connection.transaction()?;
+        let old_folder = old_folder.to_string_lossy();
+        let new_folder = new_folder.to_string_lossy();
+        transaction.execute(
+            "UPDATE import_operations
+             SET event_name = ?3,
+                 destination_path = ?5 || substr(destination_path, length(?4) + 1)
+             WHERE session_id = ?1 AND event_name = ?2
+               AND destination_path LIKE ?4 || '%'",
+            params![
+                session_id,
+                old_event_name,
+                new_event_name,
+                old_folder,
+                new_folder
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE imported_files
+             SET event_name = ?3,
+                 imported_path = ?5 || substr(imported_path, length(?4) + 1)
+             WHERE import_session_id = ?1 AND event_name = ?2
+               AND imported_path LIKE ?4 || '%'",
+            params![
+                session_id,
+                old_event_name,
+                new_event_name,
+                old_folder,
+                new_folder
+            ],
+        )?;
+        transaction.execute(
+            "UPDATE destination_reservations
+             SET destination_path = ?3 || substr(destination_path, length(?2) + 1)
+             WHERE session_id = ?1 AND destination_path LIKE ?2 || '%'",
+            params![session_id, old_folder, new_folder],
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 
     pub(crate) fn connection(&self) -> Result<Connection, ManifestError> {
@@ -992,6 +1071,38 @@ fn migrate(connection: &Connection) -> Result<(), ManifestError> {
              CREATE INDEX photo_user_metadata_source_rating_idx
                 ON photo_user_metadata(source_root, rating, rejected);
              PRAGMA user_version = 10;
+             COMMIT;",
+        )?;
+        version = 10;
+    }
+    if version == 10 {
+        connection.execute_batch(
+            "BEGIN IMMEDIATE;
+             CREATE TABLE pending_source_workflows_v11 (
+                source_id TEXT PRIMARY KEY NOT NULL,
+                source_root TEXT NOT NULL,
+                scan_json TEXT NOT NULL,
+                plan_json TEXT NOT NULL,
+                updated_at_unix_ms INTEGER NOT NULL,
+                state TEXT NOT NULL DEFAULT 'planReady',
+                source_identity_json TEXT,
+                display_name TEXT NOT NULL DEFAULT '',
+                settings_schema_version INTEGER NOT NULL DEFAULT 0,
+                error TEXT,
+                settings_revision TEXT NOT NULL DEFAULT '',
+                editor_json TEXT NOT NULL DEFAULT '{}'
+             );
+             INSERT INTO pending_source_workflows_v11 (
+                source_id, source_root, scan_json, plan_json, updated_at_unix_ms,
+                state, source_identity_json, display_name, settings_schema_version,
+                error, settings_revision, editor_json
+             ) SELECT source_root, source_root, scan_json, plan_json, updated_at_unix_ms,
+                state, source_identity_json, display_name, settings_schema_version,
+                error, settings_revision, editor_json
+               FROM pending_source_workflows;
+             DROP TABLE pending_source_workflows;
+             ALTER TABLE pending_source_workflows_v11 RENAME TO pending_source_workflows;
+             PRAGMA user_version = 11;
              COMMIT;",
         )?;
     }

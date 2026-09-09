@@ -111,6 +111,14 @@ export interface PendingSourceWorkflow {
   updatedAtUnixMs: number;
 }
 
+export interface ImportEventSummary {
+  eventId: string;
+  sessionId: string;
+  name: string;
+  folderPath: string;
+  fileCount: number;
+}
+
 export type SourceWorkflowState =
   | "detected"
   | "awaitingDecision"
@@ -401,8 +409,26 @@ export function listPendingSourceWorkflows(): Promise<PendingSourceWorkflow[]> {
   return invoke<PendingSourceWorkflow[]>("list_pending_source_workflows");
 }
 
-export function deletePendingSourceWorkflow(sourceRoot: string): Promise<void> {
-  return invoke<void>("delete_pending_source_workflow", { sourceRoot });
+export function deletePendingSourceWorkflow(sourceId: string): Promise<void> {
+  return invoke<void>("delete_pending_source_workflow", { sourceId });
+}
+
+export function deleteDisconnectedSourceWorkflows(): Promise<number> {
+  return invoke<number>("delete_disconnected_source_workflows");
+}
+
+export function listImportEvents(): Promise<ImportEventSummary[]> {
+  return invoke<ImportEventSummary[]>("list_import_events");
+}
+
+export function renameImportEvent(
+  eventId: string,
+  newName: string,
+): Promise<ImportEventSummary> {
+  return invoke<ImportEventSummary>("rename_import_event", {
+    eventId,
+    newName,
+  });
 }
 
 export function createImportSession(

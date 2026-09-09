@@ -17,6 +17,10 @@ afterEach(async () => {
   cleanup();
   clearMocks();
   vi.restoreAllMocks();
+  vi.unstubAllGlobals();
   vi.useRealTimers();
+  window.localStorage.clear();
+  delete document.documentElement.dataset.theme;
+  delete document.documentElement.dataset.themePreference;
   await setAppLanguage("en");
 });

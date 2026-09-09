@@ -6,6 +6,11 @@ import { ErrorNotice } from "../../shared/ErrorNotice";
 import { useTranslation } from "react-i18next";
 import { setAppLanguage } from "../../i18n";
 import {
+  themePreferences,
+  useTheme,
+  type ThemePreference,
+} from "../../theme/ThemeProvider";
+import {
   exportPortableSettings,
   importPortableSettings,
   loadSettings,
@@ -92,6 +97,12 @@ export function SettingsPanel() {
 
   async function persist() {
     if (!settings || validationErrors.length > 0) return;
+    if (
+      JSON.stringify(settings).includes('"autoImport"') &&
+      !savedSnapshot.includes('"autoImport"') &&
+      !window.confirm(t("settings.sourceBehavior.autoImportConfirmation"))
+    )
+      return;
     setBusy(true);
     try {
       const response = await saveSettings(settings);
@@ -198,34 +209,37 @@ export function SettingsPanel() {
 
   if (!settings) {
     return (
-      <section className="settings-empty" aria-live="polite">
-        <p>{busy ? t("settings.loading") : t("settings.loadFailed")}</p>
-        {loadError ? (
-          <ErrorNotice
-            error={describeOperationalError(loadError, "settings")}
-            onRetry={() => void reload()}
-          />
-        ) : (
-          notice && <NoticeView notice={notice} />
-        )}
-        <div className="button-row">
-          <button type="button" onClick={() => void reload()} disabled={busy}>
-            {t("common.retry")}
-          </button>
-          {backupAvailable && (
-            <button
-              type="button"
-              className="secondary"
-              onClick={() => void restoreBackup()}
-              disabled={busy}
-            >
-              {t("settings.restoreBackup")}
+      <section className="settings-layout">
+        <AppearanceSettings />
+        <div className="settings-empty" aria-live="polite">
+          <p>{busy ? t("settings.loading") : t("settings.loadFailed")}</p>
+          {loadError ? (
+            <ErrorNotice
+              error={describeOperationalError(loadError, "settings")}
+              onRetry={() => void reload()}
+            />
+          ) : (
+            notice && <NoticeView notice={notice} />
+          )}
+          <div className="button-row">
+            <button type="button" onClick={() => void reload()} disabled={busy}>
+              {t("common.retry")}
             </button>
+            {backupAvailable && (
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => void restoreBackup()}
+                disabled={busy}
+              >
+                {t("settings.restoreBackup")}
+              </button>
+            )}
+          </div>
+          {loadError?.code === "corruptedPrimary" && (
+            <p className="help-text">{t("settings.corruptFilePreserved")}</p>
           )}
         </div>
-        {loadError?.code === "corruptedPrimary" && (
-          <p className="help-text">{t("settings.corruptFilePreserved")}</p>
-        )}
       </section>
     );
   }
@@ -270,6 +284,8 @@ export function SettingsPanel() {
           ))}
         </div>
       )}
+
+      <AppearanceSettings />
 
       <SettingsSection
         title={t("settings.library.title")}
@@ -450,6 +466,7 @@ export function SettingsPanel() {
                 }),
                 exifMatchers: [],
                 defaultTimeOffsetSeconds: 0,
+                sourceBehavior: null,
               };
               setSettings({
                 ...settings,
@@ -709,6 +726,40 @@ export function SettingsPanel() {
   );
 }
 
+function AppearanceSettings() {
+  const { t } = useTranslation();
+  const { preference, resolvedTheme, setPreference } = useTheme();
+
+  return (
+    <SettingsSection
+      title={t("settings.appearance.title")}
+      description={t("settings.appearance.description")}
+    >
+      <Field label={t("settings.appearance.theme")}>
+        <select
+          aria-label={t("settings.appearance.theme")}
+          aria-describedby="theme-active-description"
+          value={preference}
+          onChange={(event) =>
+            setPreference(event.target.value as ThemePreference)
+          }
+        >
+          {themePreferences.map((theme) => (
+            <option key={theme} value={theme}>
+              {t(`settings.appearance.options.${theme}`)}
+            </option>
+          ))}
+        </select>
+        <p className="help-text" id="theme-active-description">
+          {t("settings.appearance.active", {
+            theme: t(`settings.appearance.resolved.${resolvedTheme}`),
+          })}
+        </p>
+      </Field>
+    </SettingsSection>
+  );
+}
+
 function SettingsSection({
   title,
   description,
@@ -750,8 +801,10 @@ function SourceBehaviorSelect({
   value,
   onChange,
 }: {
-  value: "ask" | "autoPreparePlan" | "ignore";
-  onChange: (value: "ask" | "autoPreparePlan" | "ignore") => void;
+  value: "ask" | "autoPreparePlan" | "autoImport" | "ignore";
+  onChange: (
+    value: "ask" | "autoPreparePlan" | "autoImport" | "ignore",
+  ) => void;
 }) {
   const { t } = useTranslation();
   return (
@@ -762,6 +815,9 @@ function SourceBehaviorSelect({
       <option value="ask">{t("settings.sourceBehavior.ask")}</option>
       <option value="autoPreparePlan">
         {t("settings.sourceBehavior.autoPreparePlan")}
+      </option>
+      <option value="autoImport">
+        {t("settings.sourceBehavior.autoImport")}
       </option>
       <option value="ignore">{t("settings.sourceBehavior.ignore")}</option>
     </select>
@@ -826,6 +882,33 @@ function CameraProfileEditor({
         </button>
       </div>
       <div className="profile-fields">
+        <Field label={t("settings.profiles.automation")}>
+          <select
+            value={profile.sourceBehavior ?? ""}
+            onChange={(event) =>
+              onChange({
+                ...profile,
+                sourceBehavior: event.target.value
+                  ? (event.target.value as NonNullable<
+                      CameraProfile["sourceBehavior"]
+                    >)
+                  : null,
+              })
+            }
+          >
+            <option value="">{t("settings.sourceBehavior.inherit")}</option>
+            <option value="ask">{t("settings.sourceBehavior.ask")}</option>
+            <option value="autoPreparePlan">
+              {t("settings.sourceBehavior.autoPreparePlan")}
+            </option>
+            <option value="autoImport">
+              {t("settings.sourceBehavior.autoImport")}
+            </option>
+            <option value="ignore">
+              {t("settings.sourceBehavior.ignore")}
+            </option>
+          </select>
+        </Field>
         <Field label={t("settings.profiles.make")}>
           <input
             value={matcher.make ?? ""}

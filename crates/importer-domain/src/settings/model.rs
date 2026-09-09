@@ -46,6 +46,8 @@ pub struct CameraProfile {
     pub name: String,
     pub exif_matchers: Vec<ExifCameraMatcher>,
     pub default_time_offset_seconds: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_behavior: Option<SourceBehavior>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -130,6 +132,7 @@ pub enum SourceBehavior {
     Ask,
     #[serde(alias = "autoScan")]
     AutoPreparePlan,
+    AutoImport,
     Ignore,
 }
 

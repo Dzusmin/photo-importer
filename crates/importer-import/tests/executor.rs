@@ -64,6 +64,18 @@ fn copies_verifies_and_records_a_file_atomically() {
         fs::read(directory.path().join("library/party/a.jpg")).unwrap(),
         b"content-a.jpg"
     );
+    let event_marker: serde_json::Value = serde_json::from_slice(
+        &fs::read(
+            directory
+                .path()
+                .join("library/party/.photo-importer-event.json"),
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(event_marker["sessionId"], session.id);
+    assert_eq!(event_marker["eventName"], "party");
+    assert_eq!(event_marker["folderName"], "party");
     let recognized = manifest
         .recognize_files(&[FileCandidate {
             item_key: "again".into(),

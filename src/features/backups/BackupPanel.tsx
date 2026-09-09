@@ -28,14 +28,17 @@ import {
 } from "../../shared/backups";
 import { loadSettings } from "../../shared/settings";
 import { listMediaSources, type SourceVolume } from "../../shared/sources";
+import { activeIntlLocale, localize as l } from "../../i18n";
 
-const phaseLabels: Record<BackupPhase, string> = {
-  scanningLibrary: "Skanowanie biblioteki",
-  hashing: "Obliczanie skrótów",
-  copying: "Kopiowanie",
-  verifying: "Weryfikacja",
-  finalizing: "Finalizacja",
-};
+function phaseLabel(phase: BackupPhase): string {
+  return {
+    scanningLibrary: l("Scanning library", "Skanowanie biblioteki"),
+    hashing: l("Calculating checksums", "Obliczanie skrótów"),
+    copying: l("Copying", "Kopiowanie"),
+    verifying: l("Verifying", "Weryfikacja"),
+    finalizing: l("Finalizing", "Finalizacja"),
+  }[phase];
+}
 
 export function BackupPanel() {
   const [targets, setTargets] = useState<BackupTarget[]>([]);
@@ -89,49 +92,51 @@ export function BackupPanel() {
       loadSettings(),
       listMediaSources(),
     ])
-      .then(async ([knownTargets, jobs, planningJobs, settings, discovered]) => {
-        const recognized = await Promise.all(
-          discovered.map((volume) =>
-            recognizeBackupTarget(volume.mountPath).catch(() => null),
-          ),
-        );
-        if (disposed) return;
-        const refreshedTargets = knownTargets.map(
-          (target) =>
-            recognized.find((candidate) => candidate?.id === target.id) ??
-            target,
-        );
-        const firstConnected = refreshedTargets.find((target) =>
-          discovered.some((volume) =>
-            samePath(volume.mountPath, target.lastKnownRoot),
-          ),
-        );
-        setTargets(refreshedTargets);
-        setVolumes(discovered);
-        const activePlanningJob = planningJobs.find(
-          (item) => item.status === "running",
-        );
-        const restoredTargetId =
-          activePlanningJob?.targetId ??
-          firstConnected?.id ??
-          refreshedTargets[0]?.id ??
-          "";
-        setSelectedTargetId(restoredTargetId);
-        setLibraryPath(settings.settings.local.libraryPath);
-        setJob(
-          jobs.find((item) => ["running", "paused"].includes(item.status)) ??
-            jobs[0] ??
-            null,
-        );
-        const restoredPlanningJob =
-          activePlanningJob ??
-          planningJobs.find((item) => item.targetId === restoredTargetId) ??
-          null;
-        setPlanningJob((current) =>
-          selectLatestPlanningJob(current, restoredPlanningJob),
-        );
-        if (restoredPlanningJob?.plan) setPlan(restoredPlanningJob.plan);
-      })
+      .then(
+        async ([knownTargets, jobs, planningJobs, settings, discovered]) => {
+          const recognized = await Promise.all(
+            discovered.map((volume) =>
+              recognizeBackupTarget(volume.mountPath).catch(() => null),
+            ),
+          );
+          if (disposed) return;
+          const refreshedTargets = knownTargets.map(
+            (target) =>
+              recognized.find((candidate) => candidate?.id === target.id) ??
+              target,
+          );
+          const firstConnected = refreshedTargets.find((target) =>
+            discovered.some((volume) =>
+              samePath(volume.mountPath, target.lastKnownRoot),
+            ),
+          );
+          setTargets(refreshedTargets);
+          setVolumes(discovered);
+          const activePlanningJob = planningJobs.find(
+            (item) => item.status === "running",
+          );
+          const restoredTargetId =
+            activePlanningJob?.targetId ??
+            firstConnected?.id ??
+            refreshedTargets[0]?.id ??
+            "";
+          setSelectedTargetId(restoredTargetId);
+          setLibraryPath(settings.settings.local.libraryPath);
+          setJob(
+            jobs.find((item) => ["running", "paused"].includes(item.status)) ??
+              jobs[0] ??
+              null,
+          );
+          const restoredPlanningJob =
+            activePlanningJob ??
+            planningJobs.find((item) => item.targetId === restoredTargetId) ??
+            null;
+          setPlanningJob((current) =>
+            selectLatestPlanningJob(current, restoredPlanningJob),
+          );
+          if (restoredPlanningJob?.plan) setPlan(restoredPlanningJob.plan);
+        },
+      )
       .catch((reason) => {
         if (!disposed) setError(normalizeBackupError(reason).message);
       })
@@ -360,10 +365,17 @@ export function BackupPanel() {
       <div className="backup-heading">
         <div>
           <p className="section-label">BACKUP</p>
-          <h2>Bezpieczna kopia całej biblioteki.</h2>
+          <h2>
+            {l(
+              "A safe copy of your entire library.",
+              "Bezpieczna kopia całej biblioteki.",
+            )}
+          </h2>
           <p>
-            Najpierw sprawdzimy zawartość i pokażemy plan. Kopiowanie rozpocznie
-            się dopiero po Twoim zatwierdzeniu.
+            {l(
+              "First, we'll inspect the contents and show you a plan. Copying will only begin after you approve it.",
+              "Najpierw sprawdzimy zawartość i pokażemy plan. Kopiowanie rozpocznie się dopiero po Twoim zatwierdzeniu.",
+            )}
           </p>
         </div>
       </div>
@@ -375,16 +387,23 @@ export function BackupPanel() {
       )}
       {!runningTargetConnected && (
         <div className="notice notice--error" role="alert">
-          Dysk backupu został odłączony. Podłącz go ponownie; nie uruchamiaj
-          nowego zadania na innym nośniku pod tą samą literą.
+          {l(
+            "The backup drive was disconnected. Reconnect it; do not start a new job on another drive using the same letter.",
+            "Dysk backupu został odłączony. Podłącz go ponownie; nie uruchamiaj nowego zadania na innym nośniku pod tą samą literą.",
+          )}
         </div>
       )}
 
       <div className="backup-targets">
         <div className="backup-section-heading">
           <div>
-            <h3>Cele backupu</h3>
-            <p>Znane dyski i ich aktualny stan połączenia.</p>
+            <h3>{l("Backup destinations", "Cele backupu")}</h3>
+            <p>
+              {l(
+                "Known drives and their current connection status.",
+                "Znane dyski i ich aktualny stan połączenia.",
+              )}
+            </p>
           </div>
           <button
             type="button"
@@ -392,34 +411,37 @@ export function BackupPanel() {
             disabled={busy}
             onClick={() => setRegistrationOpen((value) => !value)}
           >
-            Zarejestruj nowy dysk
+            {l("Register a new drive", "Zarejestruj nowy dysk")}
           </button>
         </div>
 
         {registrationOpen && (
           <div className="backup-registration">
             <label className="field">
-              <span>Nazwa dysku</span>
+              <span>{l("Drive name", "Nazwa dysku")}</span>
               <input
                 value={newTargetLabel}
-                placeholder="np. Archiwum domowe"
+                placeholder={l("e.g. Home archive", "np. Archiwum domowe")}
                 onChange={(event) => setNewTargetLabel(event.target.value)}
               />
             </label>
             <label className="field">
-              <span>Katalog główny dysku</span>
+              <span>{l("Drive root folder", "Katalog główny dysku")}</span>
               <div className="path-control">
                 <input
                   value={newTargetPath}
                   readOnly
-                  placeholder="Wybierz podłączony dysk"
+                  placeholder={l(
+                    "Choose a connected drive",
+                    "Wybierz podłączony dysk",
+                  )}
                 />
                 <button
                   type="button"
                   className="secondary"
                   onClick={() => void chooseTargetDirectory()}
                 >
-                  Wybierz…
+                  {l("Choose…", "Wybierz…")}
                 </button>
               </div>
             </label>
@@ -430,7 +452,9 @@ export function BackupPanel() {
               }
               onClick={() => void registerTarget()}
             >
-              {registering ? "Rejestrowanie…" : "Zarejestruj dysk"}
+              {registering
+                ? l("Registering…", "Rejestrowanie…")
+                : l("Register drive", "Zarejestruj dysk")}
             </button>
           </div>
         )}
@@ -438,7 +462,7 @@ export function BackupPanel() {
         <div
           className="backup-target-list"
           role="radiogroup"
-          aria-label="Cel backupu"
+          aria-label={l("Backup destination", "Cel backupu")}
         >
           {targets.map((target) => {
             const volume = volumes.find((item) =>
@@ -470,8 +494,11 @@ export function BackupPanel() {
                 </span>
                 <small>
                   {volume
-                    ? `Podłączony · wolne ${formatBytes(volume.availableBytes)}`
-                    : "Niepodłączony"}
+                    ? l(
+                        `Connected · ${formatBytes(volume.availableBytes)} free`,
+                        `Podłączony · wolne ${formatBytes(volume.availableBytes)}`,
+                      )
+                    : l("Disconnected", "Niepodłączony")}
                 </small>
               </label>
             );
@@ -479,7 +506,10 @@ export function BackupPanel() {
         </div>
         {!loading && targets.length === 0 && (
           <p className="backup-empty">
-            Nie masz jeszcze zarejestrowanego dysku backupu.
+            {l(
+              "You haven't registered a backup drive yet.",
+              "Nie masz jeszcze zarejestrowanego dysku backupu.",
+            )}
           </p>
         )}
       </div>
@@ -498,9 +528,13 @@ export function BackupPanel() {
       {!active && (
         <div className="backup-planner">
           <div className="backup-source">
-            <span>Biblioteka źródłowa</span>
+            <span>{l("Source library", "Biblioteka źródłowa")}</span>
             <code>
-              {libraryPath ?? "Nie skonfigurowano katalogu biblioteki"}
+              {libraryPath ??
+                l(
+                  "Library folder is not configured",
+                  "Nie skonfigurowano katalogu biblioteki",
+                )}
             </code>
           </div>
           <button
@@ -514,21 +548,23 @@ export function BackupPanel() {
             }
             onClick={() => void preparePlan()}
           >
-            {planning ? "Analizowanie…" : "Przygotuj plan backupu"}
+            {planning
+              ? l("Analyzing…", "Analizowanie…")
+              : l("Prepare backup plan", "Przygotuj plan backupu")}
           </button>
           {selectedTarget && !selectedVolume && (
             <p className="backup-inline-warning" role="alert">
-              Podłącz wybrany dysk, aby przygotować plan.
+              {l(
+                "Connect the selected drive to prepare a plan.",
+                "Podłącz wybrany dysk, aby przygotować plan.",
+              )}
             </p>
           )}
         </div>
       )}
 
       {planningJob && planningJob.status !== "completed" && (
-        <BackupPlanningProgress
-          job={planningJob}
-          onCancel={cancelPlanning}
-        />
+        <BackupPlanningProgress job={planningJob} onCancel={cancelPlanning} />
       )}
 
       {plan && selectedVolume && (
@@ -550,14 +586,16 @@ export function BackupPanel() {
   );
 }
 
-const backupStatusLabels: Record<BackupFileStatus, string> = {
-  current: "Aktualny",
-  new: "Nowy",
-  changed: "Zmieniony",
-  corrupt: "Uszkodzony",
-  missingInBackup: "Brakujący w backupie",
-  deletedFromLibrary: "Usunięty z biblioteki",
-};
+function backupStatusLabel(status: BackupFileStatus): string {
+  return {
+    current: l("Current", "Aktualny"),
+    new: l("New", "Nowy"),
+    changed: l("Changed", "Zmieniony"),
+    corrupt: l("Corrupted", "Uszkodzony"),
+    missingInBackup: l("Missing from backup", "Brakujący w backupie"),
+    deletedFromLibrary: l("Deleted from library", "Usunięty z biblioteki"),
+  }[status];
+}
 
 function BackupOverview({
   snapshot,
@@ -587,15 +625,23 @@ function BackupOverview({
     null;
 
   return (
-    <div className="backup-overview" aria-label="Stan kopii zapasowej">
+    <div
+      className="backup-overview"
+      aria-label={l("Backup status", "Stan kopii zapasowej")}
+    >
       <div className="backup-section-heading">
         <div>
-          <p className="section-label">ZGODNOŚĆ BIBLIOTEKI Z KOPIĄ</p>
-          <h3>Stan backupu</h3>
+          <p className="section-label">
+            {l("LIBRARY AND BACKUP CONSISTENCY", "ZGODNOŚĆ BIBLIOTEKI Z KOPIĄ")}
+          </p>
+          <h3>{l("Backup status", "Stan backupu")}</h3>
           <p>
             {lastSuccessful
-              ? `Ostatni udany backup: ${formatDate(lastSuccessful.finishedAtUnixMs ?? lastSuccessful.startedAtUnixMs)}`
-              : "Brak ukończonego backupu"}
+              ? l(
+                  `Last successful backup: ${formatDate(lastSuccessful.finishedAtUnixMs ?? lastSuccessful.startedAtUnixMs)}`,
+                  `Ostatni udany backup: ${formatDate(lastSuccessful.finishedAtUnixMs ?? lastSuccessful.startedAtUnixMs)}`,
+                )
+              : l("No completed backup", "Brak ukończonego backupu")}
           </p>
         </div>
         <div className="button-row">
@@ -605,7 +651,9 @@ function BackupOverview({
             disabled={!connected || auditing}
             onClick={onRefresh}
           >
-            {auditing ? "Sprawdzanie…" : "Sprawdź ponownie"}
+            {auditing
+              ? l("Checking…", "Sprawdzanie…")
+              : l("Check again", "Sprawdź ponownie")}
           </button>
           <button
             type="button"
@@ -613,7 +661,7 @@ function BackupOverview({
             disabled={!connected}
             onClick={() => void onOpen()}
           >
-            Otwórz katalog kopii
+            {l("Open backup folder", "Otwórz katalog kopii")}
           </button>
         </div>
       </div>
@@ -622,14 +670,16 @@ function BackupOverview({
           <strong>
             {orphanCount}{" "}
             {orphanCount === 1
-              ? "plik został usunięty"
-              : "pliki zostały usunięte"}{" "}
-            z biblioteki.
+              ? l("file was deleted", "plik został usunięty")
+              : l("files were deleted", "pliki zostały usunięte")}{" "}
+            {l("from the library.", "z biblioteki.")}
           </strong>
           <span>
             {" "}
-            Nadal pozostają w backupie. Aplikacja nie usunie ich bez Twojej
-            jawnej decyzji.
+            {l(
+              "They remain in the backup. The application will not remove them without your explicit decision.",
+              "Nadal pozostają w backupie. Aplikacja nie usunie ich bez Twojej jawnej decyzji.",
+            )}
           </span>
         </div>
       )}
@@ -637,27 +687,34 @@ function BackupOverview({
         <>
           <div
             className="backup-status-filters"
-            aria-label="Filtr stanu plików"
+            aria-label={l("File status filter", "Filtr stanu plików")}
           >
             <StatusFilter
-              label="Wszystkie"
+              label={l("All", "Wszystkie")}
               value="all"
               selected={status}
               count={files.length}
               onSelect={setStatus}
             />
-            {(Object.keys(backupStatusLabels) as BackupFileStatus[]).map(
-              (value) => (
-                <StatusFilter
-                  key={value}
-                  label={backupStatusLabels[value]}
-                  value={value}
-                  selected={status}
-                  count={count(value)}
-                  onSelect={setStatus}
-                />
-              ),
-            )}
+            {(
+              [
+                "current",
+                "new",
+                "changed",
+                "corrupt",
+                "missingInBackup",
+                "deletedFromLibrary",
+              ] as BackupFileStatus[]
+            ).map((value) => (
+              <StatusFilter
+                key={value}
+                label={backupStatusLabel(value)}
+                value={value}
+                selected={status}
+                count={count(value)}
+                onSelect={setStatus}
+              />
+            ))}
           </div>
           <div className="backup-file-list">
             {visible.map((file) => (
@@ -669,30 +726,35 @@ function BackupOverview({
                   <span
                     className={`backup-status backup-status--${file.status}`}
                   >
-                    {backupStatusLabels[file.status]}
+                    {backupStatusLabel(file.status)}
                   </span>
                   <code>{file.relativePath}</code>
                   <small>
                     {formatBytes(file.sizeBytes)} · {file.versions.length}{" "}
-                    starszych wersji
+                    {l("older version(s)", "starszych wersji")}
                   </small>
                 </summary>
                 <div className="backup-file__details">
                   <p>
-                    Aktualna kopia:{" "}
-                    <code>{file.backupSha256?.slice(0, 16) ?? "brak"}</code>
+                    {l("Current copy", "Aktualna kopia")}:{" "}
+                    <code>
+                      {file.backupSha256?.slice(0, 16) ?? l("none", "brak")}
+                    </code>
                   </p>
                   <p>
-                    Oczekiwany skrót:{" "}
+                    {l("Expected checksum", "Oczekiwany skrót")}:{" "}
                     <code>
                       {file.expectedSha256?.slice(0, 16) ??
-                        "jeszcze nie zapisano"}
+                        l("not saved yet", "jeszcze nie zapisano")}
                     </code>
                   </p>
                   {file.versions.length > 0 && (
                     <div>
                       <strong>
-                        Poprzednie wersje (gotowe pod przyszłe przywracanie)
+                        {l(
+                          "Previous versions (available for future restore)",
+                          "Poprzednie wersje (gotowe pod przyszłe przywracanie)",
+                        )}
                       </strong>
                       <ul>
                         {file.versions.map((version) => (
@@ -708,7 +770,12 @@ function BackupOverview({
               </details>
             ))}
             {visible.length === 0 && (
-              <p className="backup-empty">Brak plików o wybranym stanie.</p>
+              <p className="backup-empty">
+                {l(
+                  "No files with the selected status.",
+                  "Brak plików o wybranym stanie.",
+                )}
+              </p>
             )}
           </div>
         </>
@@ -747,22 +814,23 @@ function BackupHistory({ history }: { history: BackupRun[] }) {
   return (
     <details className="backup-history">
       <summary>
-        Historia uruchomień <strong>{history.length}</strong>
+        {l("Run history", "Historia uruchomień")}{" "}
+        <strong>{history.length}</strong>
       </summary>
       {history.length === 0 ? (
-        <p>Brak zapisanych uruchomień.</p>
+        <p>{l("No saved runs.", "Brak zapisanych uruchomień.")}</p>
       ) : (
         <ol>
           {history.map((run) => (
             <li key={run.id}>
               <span className={`backup-run backup-run--${run.outcome}`}>
                 {run.outcome === "succeeded"
-                  ? "Udany"
+                  ? l("Successful", "Udany")
                   : run.outcome === "failed"
-                    ? "Nieudany"
+                    ? l("Failed", "Nieudany")
                     : run.outcome === "cancelled"
-                      ? "Anulowany"
-                      : "Uruchomiony"}
+                      ? l("Cancelled", "Anulowany")
+                      : l("Started", "Uruchomiony")}
               </span>
               <div>
                 <strong>
@@ -777,8 +845,10 @@ function BackupHistory({ history }: { history: BackupRun[] }) {
                 )}
               </div>
               <small>
-                {run.copiedFileCount} skopiowanych · {run.unchangedFileCount}{" "}
-                aktualnych · {formatBytes(run.copiedBytes)}
+                {l(
+                  `${run.copiedFileCount} copied · ${run.unchangedFileCount} current · ${formatBytes(run.copiedBytes)}`,
+                  `${run.copiedFileCount} skopiowanych · ${run.unchangedFileCount} aktualnych · ${formatBytes(run.copiedBytes)}`,
+                )}
               </small>
             </li>
           ))}
@@ -802,44 +872,66 @@ function BackupPlanPreview({
   const count = (kind: "new" | "changed" | "repair") =>
     plan.operations.filter((operation) => operation.kind === kind).length;
   return (
-    <div className="backup-plan" aria-label="Podsumowanie planu backupu">
+    <div
+      className="backup-plan"
+      aria-label={l("Backup plan summary", "Podsumowanie planu backupu")}
+    >
       <div className="backup-section-heading">
         <div>
-          <p className="section-label">PLAN GOTOWY</p>
-          <h3>Sprawdź i zatwierdź kopiowanie</h3>
+          <p className="section-label">{l("PLAN READY", "PLAN GOTOWY")}</p>
+          <h3>
+            {l("Review and approve copying", "Sprawdź i zatwierdź kopiowanie")}
+          </h3>
         </div>
       </div>
       <div className="backup-plan-grid">
-        <Metric label="Nowe pliki" value={String(count("new"))} />
-        <Metric label="Zmienione pliki" value={String(count("changed"))} />
-        <Metric label="Pliki do naprawy" value={String(count("repair"))} />
         <Metric
-          label="Niezmienione pliki"
+          label={l("New files", "Nowe pliki")}
+          value={String(count("new"))}
+        />
+        <Metric
+          label={l("Changed files", "Zmienione pliki")}
+          value={String(count("changed"))}
+        />
+        <Metric
+          label={l("Files to repair", "Pliki do naprawy")}
+          value={String(count("repair"))}
+        />
+        <Metric
+          label={l("Unchanged files", "Niezmienione pliki")}
           value={String(plan.unchangedFileCount)}
         />
         <Metric
-          label="Wymagane miejsce"
+          label={l("Required space", "Wymagane miejsce")}
           value={formatBytes(plan.totalCopyBytes)}
         />
       </div>
       {insufficientSpace ? (
         <div className="backup-space-warning" role="alert">
-          Za mało miejsca na dysku. Potrzeba {formatBytes(plan.totalCopyBytes)},
-          a dostępne jest {formatBytes(availableBytes)}.
+          {l(
+            `Not enough disk space. ${formatBytes(plan.totalCopyBytes)} is required; ${formatBytes(availableBytes)} is available.`,
+            `Za mało miejsca na dysku. Potrzeba ${formatBytes(plan.totalCopyBytes)}, a dostępne jest ${formatBytes(availableBytes)}.`,
+          )}
         </div>
       ) : (
         <p className="backup-space-ok">
-          Dostępne miejsce: {formatBytes(availableBytes)}
+          {l("Available space", "Dostępne miejsce")}:{" "}
+          {formatBytes(availableBytes)}
         </p>
       )}
       <div className="backup-plan-actions">
-        <p>Po zatwierdzeniu pliki zostaną skopiowane i zweryfikowane.</p>
+        <p>
+          {l(
+            "Once approved, files will be copied and verified.",
+            "Po zatwierdzeniu pliki zostaną skopiowane i zweryfikowane.",
+          )}
+        </p>
         <button
           type="button"
           disabled={insufficientSpace}
           onClick={() => void onStart()}
         >
-          Zatwierdź i rozpocznij backup
+          {l("Approve and start backup", "Zatwierdź i rozpocznij backup")}
         </button>
       </div>
     </div>
@@ -865,12 +957,12 @@ function BackupPlanningProgress({
   const running = job.status === "running";
   const statusLabel =
     job.status === "cancelled"
-      ? "Planowanie zostało anulowane"
+      ? l("Planning was cancelled", "Planowanie zostało anulowane")
       : job.status === "failed"
-        ? "Planowanie nie powiodło się"
+        ? l("Planning failed", "Planowanie nie powiodło się")
         : job.cancelRequested
-          ? "Anulowanie planowania…"
-          : "Przygotowywanie planu backupu";
+          ? l("Cancelling planning…", "Anulowanie planowania…")
+          : l("Preparing backup plan", "Przygotowywanie planu backupu");
 
   return (
     <div
@@ -879,9 +971,11 @@ function BackupPlanningProgress({
     >
       <div className="backup-progress__heading">
         <div>
-          <p className="section-label">PLANOWANIE {job.id.slice(0, 8)}</p>
+          <p className="section-label">
+            {l("PLANNING", "PLANOWANIE")} {job.id.slice(0, 8)}
+          </p>
           <h3>{statusLabel}</h3>
-          {running && <strong>{phaseLabels[job.phase]}</strong>}
+          {running && <strong>{phaseLabel(job.phase)}</strong>}
         </div>
         {running && percent !== null && (
           <span className="backup-percent">{percent}%</span>
@@ -891,7 +985,7 @@ function BackupPlanningProgress({
         <div
           className={`backup-progress__track${indeterminate ? " backup-progress__track--indeterminate" : ""}`}
           role="progressbar"
-          aria-label={phaseLabels[job.phase]}
+          aria-label={phaseLabel(job.phase)}
           aria-valuemin={indeterminate ? undefined : 0}
           aria-valuemax={indeterminate ? undefined : 100}
           aria-valuenow={percent ?? undefined}
@@ -903,17 +997,19 @@ function BackupPlanningProgress({
       )}
       <div className="backup-metrics">
         <Metric
-          label="Pliki"
+          label={l("Files", "Pliki")}
           value={`${job.processedFileCount}${job.totalFileCount === null ? "" : ` / ${job.totalFileCount}`}`}
         />
         <Metric
-          label="Dane"
+          label={l("Data", "Dane")}
           value={`${formatBytes(job.processedBytes)}${job.totalBytes === null ? "" : ` / ${formatBytes(job.totalBytes)}`}`}
         />
-        <Metric label="Faza" value={phaseLabels[job.phase]} />
+        <Metric label={l("Phase", "Faza")} value={phaseLabel(job.phase)} />
       </div>
       {job.currentPath && (
-        <p className="backup-current">Aktualnie: {job.currentPath}</p>
+        <p className="backup-current">
+          {l("Current", "Aktualnie")}: {job.currentPath}
+        </p>
       )}
       {job.error && (
         <p className="backup-error" role="alert">
@@ -928,7 +1024,9 @@ function BackupPlanningProgress({
             disabled={job.cancelRequested}
             onClick={() => void onCancel()}
           >
-            {job.cancelRequested ? "Anulowanie…" : "Anuluj planowanie"}
+            {job.cancelRequested
+              ? l("Cancelling…", "Anulowanie…")
+              : l("Cancel planning", "Anuluj planowanie")}
           </button>
         </div>
       )}
@@ -957,16 +1055,19 @@ function BackupProgress({
   const terminal = ["completed", "failed", "cancelled"].includes(job.status);
   const statusLabel =
     job.status === "completed"
-      ? "Backup zakończony pomyślnie"
+      ? l("Backup completed successfully", "Backup zakończony pomyślnie")
       : job.status === "cancelled"
-        ? "Backup został anulowany"
+        ? l("Backup was cancelled", "Backup został anulowany")
         : job.status === "failed"
-          ? "Backup nie powiódł się"
+          ? l("Backup failed", "Backup nie powiódł się")
           : job.status === "paused"
-            ? "Backup wstrzymany między plikami"
+            ? l(
+                "Backup paused between files",
+                "Backup wstrzymany między plikami",
+              )
             : job.pauseRequested
-              ? "Pauza po bieżącym pliku…"
-              : "Backup trwa w tle";
+              ? l("Pausing after the current file…", "Pauza po bieżącym pliku…")
+              : l("Backup is running in the background", "Backup trwa w tle");
 
   return (
     <div
@@ -975,9 +1076,11 @@ function BackupProgress({
     >
       <div className="backup-progress__heading">
         <div>
-          <p className="section-label">ZADANIE {job.id.slice(0, 8)}</p>
+          <p className="section-label">
+            {l("JOB", "ZADANIE")} {job.id.slice(0, 8)}
+          </p>
           <h3>{statusLabel}</h3>
-          {!terminal && <strong>{phaseLabels[job.phase]}</strong>}
+          {!terminal && <strong>{phaseLabel(job.phase)}</strong>}
         </div>
         {percent !== null && <span className="backup-percent">{percent}%</span>}
       </div>
@@ -985,7 +1088,7 @@ function BackupProgress({
         <div
           className={`backup-progress__track${indeterminate ? " backup-progress__track--indeterminate" : ""}`}
           role="progressbar"
-          aria-label={phaseLabels[job.phase]}
+          aria-label={phaseLabel(job.phase)}
           aria-valuemin={indeterminate ? undefined : 0}
           aria-valuemax={indeterminate ? undefined : 100}
           aria-valuenow={percent ?? undefined}
@@ -996,39 +1099,44 @@ function BackupProgress({
         </div>
       )}
       {job.report ? (
-        <div className="backup-report" aria-label="Raport końcowy">
+        <div
+          className="backup-report"
+          aria-label={l("Final report", "Raport końcowy")}
+        >
           <Metric
-            label="Skopiowane pliki"
+            label={l("Copied files", "Skopiowane pliki")}
             value={String(job.report.copiedFileCount)}
           />
           <Metric
-            label="Niezmienione pliki"
+            label={l("Unchanged files", "Niezmienione pliki")}
             value={String(job.report.unchangedFileCount)}
           />
           <Metric
-            label="Zarchiwizowane wersje"
+            label={l("Archived versions", "Zarchiwizowane wersje")}
             value={String(job.report.versionedFileCount)}
           />
           <Metric
-            label="Skopiowane dane"
+            label={l("Copied data", "Skopiowane dane")}
             value={formatBytes(job.report.copiedBytes)}
           />
         </div>
       ) : (
         <div className="backup-metrics">
           <Metric
-            label="Pliki"
+            label={l("Files", "Pliki")}
             value={`${job.processedFileCount}${job.totalFileCount === null ? "" : ` / ${job.totalFileCount}`}`}
           />
           <Metric
-            label="Dane"
+            label={l("Data", "Dane")}
             value={`${formatBytes(job.processedBytes)}${job.totalBytes === null ? "" : ` / ${formatBytes(job.totalBytes)}`}`}
           />
-          <Metric label="Faza" value={phaseLabels[job.phase]} />
+          <Metric label={l("Phase", "Faza")} value={phaseLabel(job.phase)} />
         </div>
       )}
       {job.currentPath && (
-        <p className="backup-current">Aktualnie: {job.currentPath}</p>
+        <p className="backup-current">
+          {l("Current", "Aktualnie")}: {job.currentPath}
+        </p>
       )}
       {job.error && (
         <p className="backup-error" role="alert">
@@ -1044,7 +1152,7 @@ function BackupProgress({
               disabled={controlling}
               onClick={() => void onControl("resume")}
             >
-              Wznów
+              {l("Resume", "Wznów")}
             </button>
           ) : (
             <button
@@ -1053,7 +1161,7 @@ function BackupProgress({
               disabled={controlling || job.pauseRequested}
               onClick={() => void onControl("pause")}
             >
-              Pauza po bieżącym pliku
+              {l("Pause after the current file", "Pauza po bieżącym pliku")}
             </button>
           )}
           <button
@@ -1062,7 +1170,7 @@ function BackupProgress({
             disabled={controlling}
             onClick={() => void onControl("cancel")}
           >
-            Anuluj backup
+            {l("Cancel backup", "Anuluj backup")}
           </button>
         </div>
       )}
@@ -1094,7 +1202,9 @@ function selectLatestPlanningJob(
   if (current.status !== "running" && incoming.status === "running") {
     return current;
   }
-  return current.updatedAtUnixMs > incoming.updatedAtUnixMs ? current : incoming;
+  return current.updatedAtUnixMs > incoming.updatedAtUnixMs
+    ? current
+    : incoming;
 }
 
 function formatBytes(bytes: number): string {
@@ -1106,11 +1216,11 @@ function formatBytes(bytes: number): string {
     value /= 1024;
     index += 1;
   }
-  return `${value.toLocaleString("pl-PL", { maximumFractionDigits: 1 })} ${units[index]}`;
+  return `${value.toLocaleString(activeIntlLocale(), { maximumFractionDigits: 1 })} ${units[index]}`;
 }
 
 function formatDate(unixMs: number): string {
-  return new Intl.DateTimeFormat("pl-PL", {
+  return new Intl.DateTimeFormat(activeIntlLocale(), {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(unixMs));

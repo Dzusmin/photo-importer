@@ -32,10 +32,10 @@ struct ImportRuntime {
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct CreateSessionRequest {
-    plan: ImportPlan,
-    source_fingerprint: Option<String>,
-    source_identity: Option<SessionSourceIdentity>,
-    confirm_move: bool,
+    pub(crate) plan: ImportPlan,
+    pub(crate) source_fingerprint: Option<String>,
+    pub(crate) source_identity: Option<SessionSourceIdentity>,
+    pub(crate) confirm_move: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -186,6 +186,14 @@ pub(crate) fn create_import_session(
     request: CreateSessionRequest,
     settings: tauri::State<'_, SettingsService>,
     service: tauri::State<'_, ImportService>,
+) -> Result<ImportSession, ImportCommandError> {
+    create_import_session_internal(request, &settings, &service)
+}
+
+pub(crate) fn create_import_session_internal(
+    request: CreateSessionRequest,
+    settings: &SettingsService,
+    service: &ImportService,
 ) -> Result<ImportSession, ImportCommandError> {
     if request.plan.status != ImportPlanStatus::Ready
         || !request.plan.conflicts.is_empty()

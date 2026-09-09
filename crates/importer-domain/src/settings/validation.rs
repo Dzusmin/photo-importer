@@ -393,6 +393,7 @@ mod tests {
                 serial_number: None,
             }],
             default_time_offset_seconds: 0,
+            source_behavior: None,
         });
         settings.local.source_bindings.push(SourceBinding {
             id: Uuid::new_v4(),

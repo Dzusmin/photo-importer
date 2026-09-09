@@ -13,7 +13,18 @@ vi.mock("./features/background/BackgroundMonitor", () => ({
   BackgroundMonitor: () => <div>monitor-test</div>,
 }));
 vi.mock("./features/sources/SourceScanner", () => ({
-  SourceScanner: () => <div>scanner-test</div>,
+  SourceScanner: ({ openWorkflowId }: { openWorkflowId?: string | null }) => (
+    <div data-testid="scanner-test">
+      scanner-test:{openWorkflowId ?? "none"}
+    </div>
+  ),
+}));
+vi.mock("./features/plans/PlansPanel", () => ({
+  PlansPanel: ({ onOpen }: { onOpen: (sourceId: string) => void }) => (
+    <button type="button" onClick={() => onOpen("marker:card-1")}>
+      open-plan-test
+    </button>
+  ),
 }));
 vi.mock("./features/settings/SettingsPanel", () => ({
   SettingsPanel: () => <div>settings-test</div>,
@@ -37,14 +48,42 @@ describe("App", () => {
     render(<App />);
 
     expect((await screen.findAllByText("Ready")).length).toBeGreaterThan(0);
-    expect(screen.getByText("scanner-test")).toBeInTheDocument();
+    expect(screen.getByTestId("scanner-test")).toHaveTextContent(
+      "scanner-test:none",
+    );
     await user.click(screen.getByRole("button", { name: "Activity" }));
     expect(screen.getByText("monitor-test")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Backup" }));
     expect(screen.getByText("backup-test")).toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "Settings" }));
     expect(screen.getByText("settings-test")).toBeInTheDocument();
-    expect(screen.queryByText("scanner-test")).not.toBeInTheDocument();
+    expect(screen.getByTestId("scanner-test")).not.toBeVisible();
+  });
+
+  it("keeps the home scanner mounted and clears an explicitly opened plan", async () => {
+    getSystemStatus.mockResolvedValue({
+      productName: "Photo Importer",
+      appVersion: "0.1.0",
+      operatingSystem: "windows",
+      architecture: "x86_64",
+      backendStatus: "ready",
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    const scanner = await screen.findByTestId("scanner-test");
+    await user.click(screen.getByRole("button", { name: "Plans" }));
+    expect(scanner).not.toBeVisible();
+    await user.click(screen.getByRole("button", { name: "open-plan-test" }));
+    expect(screen.getByTestId("scanner-test")).toBe(scanner);
+    expect(scanner).toBeVisible();
+    expect(scanner).toHaveTextContent("scanner-test:marker:card-1");
+
+    await user.click(screen.getByRole("button", { name: "Plans" }));
+    await user.click(screen.getByRole("button", { name: "Import" }));
+    expect(screen.getByTestId("scanner-test")).toBe(scanner);
+    expect(scanner).toBeVisible();
+    expect(scanner).toHaveTextContent("scanner-test:none");
   });
 
   it("shows a connection error when diagnostics fail", async () => {

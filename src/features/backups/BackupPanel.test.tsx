@@ -13,6 +13,7 @@ import type {
 import type { SourceVolume } from "../../shared/sources";
 import { settingsResponseFixture } from "../../test/fixtures";
 import { BackupPanel } from "./BackupPanel";
+import { setAppLanguage } from "../../i18n";
 
 const { openDialog } = vi.hoisted(() => ({ openDialog: vi.fn() }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: openDialog }));
@@ -207,9 +208,10 @@ const snapshot: BackupSnapshot = {
 };
 
 describe("BackupPanel", () => {
-  beforeEach(() => {
+  beforeEach(async () => {
     eventBus.clear();
     openDialog.mockReset();
+    await setAppLanguage("pl");
   });
 
   it("requires plan approval, then exposes progress controls and a final report", async () => {
@@ -370,10 +372,10 @@ describe("BackupPanel", () => {
     expect(screen.getByText("5 / 10")).toBeInTheDocument();
 
     await user.click(screen.getByRole("button", { name: "Anuluj planowanie" }));
-    await waitFor(() =>
-      expect(calls).toContain("cancel_backup_planning_job"),
-    );
-    expect(await screen.findByText("Anulowanie planowania…")).toBeInTheDocument();
+    await waitFor(() => expect(calls).toContain("cancel_backup_planning_job"));
+    expect(
+      await screen.findByText("Anulowanie planowania…"),
+    ).toBeInTheDocument();
   });
 
   it("registers a new target using the system directory picker", async () => {

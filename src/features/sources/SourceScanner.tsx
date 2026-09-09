@@ -41,6 +41,7 @@ import {
   type MediaScanJob,
   type StreamedScanItems,
   type CameraIdentity,
+  type SourceIdentity,
   type PendingSourceWorkflow,
   type PhotoUserMetadataUpdate,
 } from "../../shared/sources";
@@ -52,21 +53,37 @@ interface CameraProfileDraft {
   name: string;
   itemCount: number;
 }
+
+type ScanSource =
+  | {
+      kind: "volume";
+      sourceId: string;
+      identity: SourceIdentity | null;
+      displayName: string;
+    }
+  | {
+      kind: "directory";
+      sourceId: string;
+      displayName: string;
+    };
 import { requestThumbnail } from "../../shared/thumbnailManager";
 import {
   describeOperationalError,
   type AppStatus,
 } from "../../shared/appStatus";
 import { ErrorNotice } from "../../shared/ErrorNotice";
+import { activeIntlLocale, localize as l } from "../../i18n";
 
 const ignoreHealthChange = () => undefined;
 
 export function SourceScanner({
   appStatus = "ready",
   onHealthChange = ignoreHealthChange,
+  openWorkflowId = null,
 }: {
   appStatus?: AppStatus;
   onHealthChange?: (healthy: boolean) => void;
+  openWorkflowId?: string | null;
 } = {}) {
   const [sources, setSources] = useState<SourceVolume[]>([]);
   const [settings, setSettings] = useState<AppSettings | null>(null);
@@ -119,8 +136,14 @@ export function SourceScanner({
     PendingSourceWorkflow[]
   >([]);
   const autoPlannedRoot = useRef<string | null>(null);
+  const displayedScanRoot = useRef<string | null>(null);
+  const displayedWorkflowId = useRef<string | null>(null);
+  const scanSource = useRef<ScanSource | null>(null);
   const metadataSaveQueue = useRef<Promise<void>>(Promise.resolve());
+  const workflowSaveQueues = useRef<Map<string, Promise<void>>>(new Map());
   const metadataLoadGeneration = useRef(0);
+  const sourceRefreshInFlight = useRef<Promise<void> | null>(null);
+  const previouslyOpenedWorkflowId = useRef<string | null>(null);
   const cameraSources = useMemo(
     () => sources.filter((source) => source.likelyCameraSource),
     [sources],
@@ -133,6 +156,39 @@ export function SourceScanner({
       .then((response) => setSettings(response.settings))
       .catch((error) => setMessage(normalizeSettingsError(error).message));
   }, []);
+
+  useEffect(() => {
+    if (!openWorkflowId) return;
+    const workflow = pendingWorkflows.find(
+      (candidate) => candidate.sourceId === openWorkflowId,
+    );
+    if (
+      workflow?.scan &&
+      workflow.state !== "disconnected" &&
+      displayedScanRoot.current !== workflow.scan.scan.root
+    ) {
+      openWorkflow(workflow);
+    }
+  }, [openWorkflowId, pendingWorkflows]);
+
+  useEffect(() => {
+    if (previouslyOpenedWorkflowId.current && !openWorkflowId) {
+      setScanResult(null);
+      setImportPlan(null);
+      setProfileDrafts(null);
+      setSelectedKeys(new Set());
+      setEventNames({});
+      setExcludedImportKeys(new Set());
+      setItemProfileAssignments({});
+      setExpandedEventIndexes(new Set());
+      setUserMetadata({});
+      displayedScanRoot.current = null;
+      displayedWorkflowId.current = null;
+      scanSource.current = null;
+      setMessage(null);
+    }
+    previouslyOpenedWorkflowId.current = openWorkflowId;
+  }, [openWorkflowId]);
 
   useEffect(() => {
     let active = true;
@@ -184,7 +240,13 @@ export function SourceScanner({
 
   useEffect(() => {
     const unlisten = listen<string>("request-source-scan", (event) => {
-      void runScan(event.payload, "Skanowanie karty oczekującej na decyzję…");
+      void runScan(
+        event.payload,
+        l(
+          "Scanning a card awaiting a decision…",
+          "Skanowanie karty oczekującej na decyzję…",
+        ),
+      );
     });
     return () => {
       void unlisten.then((stop) => stop());
@@ -198,8 +260,6 @@ export function SourceScanner({
         if (active) {
           const restored = workflows ?? [];
           setPendingWorkflows(restored);
-          const pending = restored.find((workflow) => workflow.scan !== null);
-          if (pending) openWorkflow(pending);
         }
       })
       .catch(() => undefined);
@@ -214,15 +274,58 @@ export function SourceScanner({
       "source-workflow-changed",
       (event) => {
         if (!active) return;
+        if (event.payload.scan?.scan.root === displayedScanRoot.current) {
+          displayedWorkflowId.current = event.payload.sourceId;
+        }
         setPendingWorkflows((current) => [
           event.payload,
           ...current.filter(
-            (workflow) => workflow.sourceRoot !== event.payload.sourceRoot,
+            (workflow) => workflow.sourceId !== event.payload.sourceId,
           ),
         ]);
-        if (event.payload.scan) openWorkflow(event.payload);
       },
     );
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, []);
+
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<string>("source-workflows-invalidated", (event) => {
+      void listPendingSourceWorkflows()
+        .then((workflows) => {
+          if (!active) return;
+          const refreshed = workflows ?? [];
+          setPendingWorkflows(refreshed);
+          const invalidatedWorkflow = refreshed.find(
+            (workflow) => workflow.sourceId === event.payload,
+          );
+          if (
+            invalidatedWorkflow?.state === "disconnected" &&
+            invalidatedWorkflow.sourceId === displayedWorkflowId.current &&
+            invalidatedWorkflow.scan?.scan.root === displayedScanRoot.current
+          ) {
+            setScanResult(null);
+            setImportPlan(null);
+            setProfileDrafts(null);
+            setSelectedKeys(new Set());
+            setEventNames({});
+            setExcludedImportKeys(new Set());
+            setItemProfileAssignments({});
+            setExpandedEventIndexes(new Set());
+            setUserMetadata({});
+            setMetadataLoadedFor(null);
+            metadataLoadGeneration.current += 1;
+            displayedScanRoot.current = null;
+            displayedWorkflowId.current = null;
+            scanSource.current = null;
+            setMessage(null);
+          }
+        })
+        .catch(() => undefined);
+    });
     return () => {
       active = false;
       void unlisten.then((stop) => stop());
@@ -261,7 +364,7 @@ export function SourceScanner({
             ([group.identity.make, group.identity.model]
               .filter(Boolean)
               .join(" ") ||
-              "Nowy aparat"),
+              l("New camera", "Nowy aparat")),
           itemCount: group.itemCount,
         };
       }),
@@ -318,7 +421,12 @@ export function SourceScanner({
         if (active && running) {
           setScanJob(running);
           setScanningPath(running.path);
-          setMessage("Skan uruchomiony przez automat działa w tle…");
+          setMessage(
+            l(
+              "The automatically started scan is running in the background…",
+              "Skan uruchomiony przez automat działa w tle…",
+            ),
+          );
         }
       })
       .catch(() => undefined);
@@ -337,10 +445,14 @@ export function SourceScanner({
         applyCompletedScan(job.result, job.id);
         setScanningPath(null);
       } else if (job.status === "failed") {
-        setMessage(job.error ?? "Skanowanie nie powiodło się.");
+        setMessage(
+          job.error ?? l("Scanning failed.", "Skanowanie nie powiodło się."),
+        );
         setScanningPath(null);
       } else if (job.status === "cancelled") {
-        setMessage("Skanowanie zostało anulowane.");
+        setMessage(
+          l("Scanning was cancelled.", "Skanowanie zostało anulowane."),
+        );
         setScanningPath(null);
       }
     });
@@ -385,19 +497,29 @@ export function SourceScanner({
     };
   }, []);
 
-  const refreshSources = useCallback(async () => {
-    try {
-      const discovered = await listMediaSources();
-      setSources(discovered);
-      setDiscoveryError(null);
-      setDiscoveryComplete(true);
-      onHealthChange(true);
-    } catch (error) {
-      setSources([]);
-      setDiscoveryError(error);
-      setDiscoveryComplete(false);
-      onHealthChange(false);
-    }
+  const refreshSources = useCallback(() => {
+    if (sourceRefreshInFlight.current) return sourceRefreshInFlight.current;
+    const request = (async () => {
+      try {
+        const discovered = await listMediaSources();
+        setSources(discovered);
+        setDiscoveryError(null);
+        setDiscoveryComplete(true);
+        onHealthChange(true);
+      } catch (error) {
+        setSources([]);
+        setDiscoveryError(error);
+        setDiscoveryComplete(false);
+        onHealthChange(false);
+      }
+    })();
+    sourceRefreshInFlight.current = request;
+    void request.finally(() => {
+      if (sourceRefreshInFlight.current === request) {
+        sourceRefreshInFlight.current = null;
+      }
+    });
+    return request;
   }, [onHealthChange]);
 
   useEffect(() => {
@@ -407,19 +529,28 @@ export function SourceScanner({
       return;
     }
     let active = true;
-    const refresh = async () => {
-      if (active) await refreshSources();
+    let timer: number | null = null;
+    const refreshAndSchedule = async () => {
+      await refreshSources();
+      if (active) {
+        timer = window.setTimeout(() => void refreshAndSchedule(), 5_000);
+      }
     };
-    void refresh();
-    const timer = window.setInterval(() => void refresh(), 5_000);
+    void refreshAndSchedule();
     return () => {
       active = false;
-      window.clearInterval(timer);
+      if (timer !== null) window.clearTimeout(timer);
     };
   }, [appStatus === "connecting" || appStatus === "error", refreshSources]);
 
-  async function runScan(path: string, initialMessage?: string) {
+  async function runScan(
+    path: string,
+    initialMessage?: string,
+    requestedSource?: SourceVolume | "directory",
+  ) {
     setScanningPath(path);
+    displayedScanRoot.current = path;
+    displayedWorkflowId.current = null;
     setScanResult(null);
     setStreamedScans({});
     setProfileDrafts(null);
@@ -431,8 +562,41 @@ export function SourceScanner({
     setExpandedEventIndexes(new Set());
     autoPlannedRoot.current = null;
     setSelectedKeys(new Set());
-    setMessage(initialMessage ?? "Skanowanie źródła…");
+    setMessage(initialMessage ?? l("Scanning source…", "Skanowanie źródła…"));
     try {
+      let detectedSource =
+        requestedSource === "directory"
+          ? undefined
+          : (requestedSource ??
+            sources.find((source) => source.mountPath === path));
+      if (detectedSource) {
+        displayedWorkflowId.current = sourceWorkflowId(detectedSource);
+      }
+      if (
+        detectedSource &&
+        !detectedSource.markerUuid &&
+        !detectedSource.readOnly
+      ) {
+        const markerUuid = await ensureMediaSourceMarker(path);
+        displayedWorkflowId.current = `marker:${markerUuid}`;
+        setSources((current) =>
+          current.map((source) =>
+            source.mountPath === path ? { ...source, markerUuid } : source,
+          ),
+        );
+        detectedSource = { ...detectedSource, markerUuid };
+      }
+      scanSource.current =
+        requestedSource === "directory"
+          ? directoryScanSource(path)
+          : detectedSource
+            ? volumeScanSource(detectedSource)
+            : {
+                kind: "volume",
+                sourceId: `unverified:${path}`,
+                identity: null,
+                displayName: displayFileName(path),
+              };
       const job = await startMediaScan(path);
       setScanJob(job);
     } catch (error) {
@@ -442,6 +606,7 @@ export function SourceScanner({
   }
 
   function applyCompletedScan(result: SourceScanResponse, scanId: string) {
+    displayedScanRoot.current = result.scan.root;
     setScanResult(result);
     setStreamedScans((current) => {
       const next = { ...current };
@@ -461,13 +626,29 @@ export function SourceScanner({
     void hydrateUserMetadata(result.scan.root);
     setMessage(
       result.scan.items.length === 0
-        ? "Nie znaleziono obsługiwanych zdjęć ani filmów."
-        : `Skanowanie zakończone: ${result.scan.items.length} pozycji w ${result.events.length} wydarzeniach.`,
+        ? l(
+            "No supported photos or videos were found.",
+            "Nie znaleziono obsługiwanych zdjęć ani filmów.",
+          )
+        : l(
+            `Scan complete: ${result.scan.items.length} items in ${result.events.length} events.`,
+            `Skanowanie zakończone: ${result.scan.items.length} pozycji w ${result.events.length} wydarzeniach.`,
+          ),
     );
   }
 
   function openWorkflow(workflow: PendingSourceWorkflow) {
     if (!workflow.scan) return;
+    displayedScanRoot.current = workflow.scan.scan.root;
+    displayedWorkflowId.current = workflow.sourceId;
+    scanSource.current = workflow.sourceId.startsWith("directory:")
+      ? directoryScanSource(workflow.sourceRoot, workflow.displayName)
+      : {
+          kind: "volume",
+          sourceId: workflow.sourceId,
+          identity: workflow.sourceIdentity,
+          displayName: workflow.displayName,
+        };
     setUserMetadata({});
     setMetadataLoadedFor(null);
     const settingsChanged =
@@ -491,10 +672,20 @@ export function SourceScanner({
     );
     setMessage(
       settingsChanged
-        ? "Ustawienia nazewnictwa zmieniły się — przelicz plan ponownie."
+        ? l(
+            "Naming settings have changed — rebuild the plan.",
+            "Ustawienia nazewnictwa zmieniły się — przelicz plan ponownie.",
+          )
         : workflow.state === "planReady"
-          ? "Przywrócono plan oczekujący na zatwierdzenie."
-          : (workflow.error ?? "Przywrócono stan karty wymagającej uwagi."),
+          ? l(
+              "Restored a plan awaiting approval.",
+              "Przywrócono plan oczekujący na zatwierdzenie.",
+            )
+          : (workflow.error ??
+            l(
+              "Restored a card state that requires attention.",
+              "Przywrócono stan karty wymagającej uwagi.",
+            )),
     );
   }
 
@@ -541,26 +732,39 @@ export function SourceScanner({
       });
   }
 
+  function queueWorkflowSave(workflow: PendingSourceWorkflow): Promise<void> {
+    const queueKey = workflow.sourceRoot;
+    const previous = workflowSaveQueues.current.get(queueKey);
+    const queued = (previous ?? Promise.resolve())
+      .catch(() => undefined)
+      .then(() => savePendingSourceWorkflow(workflow));
+    workflowSaveQueues.current.set(queueKey, queued);
+    void queued.then(
+      () => {
+        if (workflowSaveQueues.current.get(queueKey) === queued)
+          workflowSaveQueues.current.delete(queueKey);
+      },
+      (error) => {
+        if (workflowSaveQueues.current.get(queueKey) === queued)
+          workflowSaveQueues.current.delete(queueKey);
+        setMessage(normalizeSettingsError(error).message);
+      },
+    );
+    return queued;
+  }
+
   function invalidatePlan(
+    editor: PendingSourceWorkflow["editor"],
     result: SourceScanResponse | null = scanResult,
-    expandedIndexes: Set<number> = expandedEventIndexes,
   ) {
     setImportPlan(null);
     if (!result) return;
-    const source = sources.find(
-      (candidate) => candidate.mountPath === result.scan.root,
-    );
-    void savePendingSourceWorkflow({
+    const source = workflowSourceFor(result.scan.root, scanSource.current);
+    void queueWorkflowSave({
       sourceRoot: result.scan.root,
-      sourceId: source?.markerUuid ?? source?.fingerprint ?? result.scan.root,
-      sourceIdentity: source
-        ? {
-            markerUuid: source.markerUuid,
-            platformVolumeId: source.platformVolumeId,
-            fallbackFingerprint: source.fingerprint,
-          }
-        : null,
-      displayName: source?.name ?? displayFileName(result.scan.root),
+      sourceId: source.sourceId,
+      sourceIdentity: source.sourceIdentity,
+      displayName: source.displayName,
       state: "preparingPlan",
       scan: result,
       plan: null,
@@ -568,12 +772,7 @@ export function SourceScanner({
       settingsRevision: settings
         ? JSON.stringify(settings.portable.naming)
         : "",
-      editor: {
-        eventNames,
-        excludedItemKeys: [...excludedImportKeys],
-        itemProfileAssignments,
-        expandedEventIndexes: [...expandedIndexes],
-      },
+      editor,
       updatedAtUnixMs: Date.now(),
       error: null,
     });
@@ -586,28 +785,14 @@ export function SourceScanner({
     const existing = pendingWorkflows.find(
       (workflow) => workflow.sourceRoot === scanResult.scan.root,
     );
-    const source = sources.find(
-      (candidate) => candidate.mountPath === scanResult.scan.root,
-    );
+    const source = workflowSourceFor(scanResult.scan.root, scanSource.current);
     const workflow: PendingSourceWorkflow = {
-      sourceId:
-        existing?.sourceId ??
-        source?.markerUuid ??
-        source?.fingerprint ??
-        scanResult.scan.root,
+      sourceId: existing?.sourceId ?? source.sourceId,
       sourceRoot: scanResult.scan.root,
-      sourceIdentity:
-        existing?.sourceIdentity ??
-        (source
-          ? {
-              markerUuid: source.markerUuid,
-              platformVolumeId: source.platformVolumeId,
-              fallbackFingerprint: source.fingerprint,
-            }
-          : null),
+      sourceIdentity: existing?.sourceIdentity ?? source.sourceIdentity,
       displayName:
         existing?.displayName ??
-        source?.name ??
+        source.displayName ??
         displayFileName(scanResult.scan.root),
       state: existing?.state ?? (importPlan ? "planReady" : "preparingPlan"),
       scan: scanResult,
@@ -630,10 +815,10 @@ export function SourceScanner({
     setPendingWorkflows((current) => [
       workflow,
       ...current.filter(
-        (candidate) => candidate.sourceRoot !== workflow.sourceRoot,
+        (candidate) => candidate.sourceId !== workflow.sourceId,
       ),
     ]);
-    void savePendingSourceWorkflow(workflow);
+    void queueWorkflowSave(workflow);
   }
 
   async function confirmDetectedProfiles() {
@@ -650,7 +835,7 @@ export function SourceScanner({
         const id = crypto.randomUUID();
         cameraProfiles.push({
           id,
-          name: draft.name.trim() || "Nowy aparat",
+          name: draft.name.trim() || l("New camera", "Nowy aparat"),
           exifMatchers: [draft.identity],
           defaultTimeOffsetSeconds: 0,
         });
@@ -715,7 +900,12 @@ export function SourceScanner({
       );
       await acknowledgePendingSource(source.mountPath).catch(() => undefined);
       setProfileDrafts([]);
-      setMessage("Profile aparatów i karta zostały zatwierdzone.");
+      setMessage(
+        l(
+          "Camera profiles and card were approved.",
+          "Profile aparatów i karta zostały zatwierdzone.",
+        ),
+      );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     }
@@ -725,7 +915,12 @@ export function SourceScanner({
     if (!scanJob || scanJob.status !== "running") return;
     try {
       await cancelMediaScan(scanJob.id);
-      setMessage("Anulowanie po bieżącym pliku…");
+      setMessage(
+        l(
+          "Cancelling after the current file…",
+          "Anulowanie po bieżącym pliku…",
+        ),
+      );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     }
@@ -745,16 +940,28 @@ export function SourceScanner({
         scan: { ...scanResult.scan, items: response.items },
         events: response.events,
       };
-      setScanResult(correctedResult);
-      setEventNames((current) => ({
+      const correctedEventNames = {
         ...defaultEventNames(response.events),
-        ...current,
-      }));
+        ...eventNames,
+      };
+      setScanResult(correctedResult);
+      setEventNames(correctedEventNames);
       const noExpandedEvents = new Set<number>();
       setExpandedEventIndexes(noExpandedEvents);
-      invalidatePlan(correctedResult, noExpandedEvents);
+      invalidatePlan(
+        {
+          eventNames: correctedEventNames,
+          excludedItemKeys: [...excludedImportKeys],
+          itemProfileAssignments,
+          expandedEventIndexes: [],
+        },
+        correctedResult,
+      );
       setMessage(
-        `Skorygowano czas ${response.changedItemCount} pozycji i ponownie pogrupowano wydarzenia.`,
+        l(
+          `Corrected the time of ${response.changedItemCount} items and regrouped events.`,
+          `Skorygowano czas ${response.changedItemCount} pozycji i ponownie pogrupowano wydarzenia.`,
+        ),
       );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
@@ -767,9 +974,12 @@ export function SourceScanner({
     const directory = await open({
       directory: true,
       multiple: false,
-      title: "Wybierz kartę, katalog lub udział sieciowy do skanowania",
+      title: l(
+        "Choose a card, folder, or network share to scan",
+        "Wybierz kartę, katalog lub udział sieciowy do skanowania",
+      ),
     });
-    if (directory) await runScan(directory);
+    if (directory) await runScan(directory, undefined, "directory");
   }
 
   function profileFor(source: SourceVolume) {
@@ -782,11 +992,39 @@ export function SourceScanner({
   async function prepareImportPlan(automatic = false) {
     if (!scanResult || !settings) return;
     if (metadataLoadedFor !== scanResult.scan.root) {
-      setMessage("Poczekaj na wczytanie ocen i statusów zdjęć.");
+      setMessage(
+        l(
+          "Wait for photo ratings and statuses to load.",
+          "Poczekaj na wczytanie ocen i statusów zdjęć.",
+        ),
+      );
       return;
     }
     if (profileDrafts && profileDrafts.length > 0) {
-      setMessage("Najpierw zatwierdź profile aparatów znalezione na karcie.");
+      setMessage(
+        l(
+          "First approve the camera profiles found on the card.",
+          "Najpierw zatwierdź profile aparatów znalezione na karcie.",
+        ),
+      );
+      return;
+    }
+    const scannedSource = scanSource.current;
+    const source =
+      scannedSource?.kind === "volume" && scannedSource.identity
+        ? sources.find(
+            (candidate) =>
+              candidate.mountPath === scanResult.scan.root &&
+              sourceMatchesIdentity(candidate, scannedSource.identity!),
+          )
+        : undefined;
+    if (!scannedSource || (scannedSource.kind !== "directory" && !source)) {
+      setMessage(
+        l(
+          "The scanned card is unavailable or its identity cannot be confirmed. Reconnect the same card before rebuilding the plan.",
+          "Zeskanowana karta jest niedostępna albo nie można potwierdzić jej tożsamości. Podłącz tę samą kartę przed ponownym przeliczeniem planu.",
+        ),
+      );
       return;
     }
     setPlanning(true);
@@ -794,9 +1032,6 @@ export function SourceScanner({
     try {
       const importedSourcePaths = scanResult.importMatches.flatMap(
         (match) => match.importedSourcePaths,
-      );
-      const source = sources.find(
-        (candidate) => candidate.mountPath === scanResult.scan.root,
       );
       const profile = source ? profileFor(source) : undefined;
       const itemContexts = Object.fromEntries(
@@ -812,7 +1047,8 @@ export function SourceScanner({
             {
               cameraMake: item.cameraIdentity?.make ?? null,
               cameraModel: item.cameraIdentity?.model ?? null,
-              cameraAlias: itemProfile?.name ?? "Nieznany aparat",
+              cameraAlias:
+                itemProfile?.name ?? l("Unknown camera", "Nieznany aparat"),
               sourceAlias:
                 source?.name.trim() ||
                 displayFileName(scanResult.scan.root) ||
@@ -824,7 +1060,7 @@ export function SourceScanner({
       const plan = await buildImportPlanPreview({
         events: scanResult.events.map((event) => ({
           event,
-          name: eventNames[event.index] ?? `wydarzenie-${event.index}`,
+          name: eventNames[event.index] ?? defaultEventName(event.index),
         })),
         excludedItemKeys: [
           ...new Set([
@@ -850,7 +1086,9 @@ export function SourceScanner({
       if (plan.status !== "empty") {
         const workflow: PendingSourceWorkflow = {
           sourceId:
-            source?.markerUuid ?? source?.fingerprint ?? scanResult.scan.root,
+            scannedSource.kind === "directory"
+              ? scannedSource.sourceId
+              : sourceWorkflowId(source!),
           sourceRoot: scanResult.scan.root,
           sourceIdentity: source
             ? {
@@ -859,7 +1097,10 @@ export function SourceScanner({
                 fallbackFingerprint: source.fingerprint,
               }
             : null,
-          displayName: source?.name ?? displayFileName(scanResult.scan.root),
+          displayName:
+            source?.name ??
+            scannedSource.displayName ??
+            displayFileName(scanResult.scan.root),
           state: "planReady",
           scan: scanResult,
           plan,
@@ -874,11 +1115,11 @@ export function SourceScanner({
           error: null,
           updatedAtUnixMs: Date.now(),
         };
-        await savePendingSourceWorkflow(workflow);
+        await queueWorkflowSave(workflow);
         setPendingWorkflows((current) => [
           workflow,
           ...current.filter(
-            (candidate) => candidate.sourceRoot !== workflow.sourceRoot,
+            (candidate) => candidate.sourceId !== workflow.sourceId,
           ),
         ]);
       }
@@ -887,10 +1128,19 @@ export function SourceScanner({
       }
       setMessage(
         plan.status === "requiresDecision"
-          ? `Plan zawiera ${plan.conflicts.length} kolizji wymagających decyzji.`
+          ? l(
+              `The plan contains ${plan.conflicts.length} conflicts that require a decision.`,
+              `Plan zawiera ${plan.conflicts.length} kolizji wymagających decyzji.`,
+            )
           : plan.status === "empty"
-            ? "Plan jest pusty — wszystkie pozycje są wykluczone lub już zaimportowane."
-            : `Plan gotowy: ${plan.fileCount} plików w ${plan.events.length} folderach.`,
+            ? l(
+                "The plan is empty — all items are excluded or already imported.",
+                "Plan jest pusty — wszystkie pozycje są wykluczone lub już zaimportowane.",
+              )
+            : l(
+                `Plan ready: ${plan.fileCount} files in ${plan.events.length} folders.`,
+                `Plan gotowy: ${plan.fileCount} plików w ${plan.events.length} folderach.`,
+              ),
       );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
@@ -899,23 +1149,29 @@ export function SourceScanner({
     }
   }
 
-  async function beginImport() {
-    if (!importPlan || !settings) return;
+  async function beginImport(
+    selectedPlan: ImportPlan | null = importPlan,
+    selectedScan: SourceScanResponse | null = scanResult,
+  ) {
+    if (!selectedPlan || selectedPlan.status !== "ready" || !settings) return;
     const moving =
       settings.portable.import.defaultOperation === "moveAfterVerification";
     const confirmMove =
       !moving ||
       window.confirm(
-        "Po zweryfikowaniu całych zestawów aplikacja usunie pliki źródłowe. Czy na pewno rozpocząć przenoszenie?",
+        l(
+          "After complete sets are verified, the application will delete the source files. Start moving files?",
+          "Po zweryfikowaniu całych zestawów aplikacja usunie pliki źródłowe. Czy na pewno rozpocząć przenoszenie?",
+        ),
       );
     if (!confirmMove) return;
     setImportActionPending(true);
     try {
       const source = sources.find(
-        (candidate) => candidate.mountPath === scanResult?.scan.root,
+        (candidate) => candidate.mountPath === selectedScan?.scan.root,
       );
       const session = await createImportSession(
-        importPlan,
+        selectedPlan,
         source?.fingerprint ?? null,
         source
           ? {
@@ -927,18 +1183,22 @@ export function SourceScanner({
         confirmMove,
       );
       setImportSession(session);
-      if (scanResult) {
-        await deletePendingSourceWorkflow(scanResult.scan.root).catch(
-          () => undefined,
+      if (selectedScan) {
+        const workflow = pendingWorkflows.find(
+          (candidate) => candidate.scan?.scan.root === selectedScan.scan.root,
         );
+        if (workflow)
+          await deletePendingSourceWorkflow(workflow.sourceId).catch(
+            () => undefined,
+          );
         setPendingWorkflows((current) =>
           current.filter(
-            (workflow) => workflow.sourceRoot !== scanResult.scan.root,
+            (candidate) => candidate.sourceId !== workflow?.sourceId,
           ),
         );
       }
       await startImportSession(session.id);
-      setMessage("Import został rozpoczęty.");
+      setMessage(l("Import started.", "Import został rozpoczęty."));
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     } finally {
@@ -948,17 +1208,76 @@ export function SourceScanner({
 
   async function deleteImportPlan() {
     if (!scanResult || !importPlan) return;
+    if (
+      !window.confirm(
+        l(
+          "Delete this import plan? Scan results and selections will be lost. No photos will be deleted.",
+          "Usunąć ten plan importu? Wyniki skanu i wybory zostaną utracone. Zdjęcia nie zostaną usunięte.",
+        ),
+      )
+    )
+      return;
     setImportActionPending(true);
     try {
-      await deletePendingSourceWorkflow(scanResult.scan.root);
-      setPendingWorkflows((current) =>
-        current.filter(
-          (workflow) => workflow.sourceRoot !== scanResult.scan.root,
-        ),
+      const workflow = pendingWorkflows.find(
+        (candidate) => candidate.scan?.scan.root === scanResult.scan.root,
       );
+      const source = sources.find(
+        (candidate) => candidate.mountPath === scanResult.scan.root,
+      );
+      const sourceId =
+        workflow?.sourceId ?? (source ? sourceWorkflowId(source) : null);
+      if (sourceId) {
+        await deletePendingSourceWorkflow(sourceId);
+        setPendingWorkflows((current) =>
+          current.filter((candidate) => candidate.sourceId !== sourceId),
+        );
+      }
       autoPlannedRoot.current = scanResult.scan.root;
+      setScanResult(null);
       setImportPlan(null);
-      setMessage("Plan importu został usunięty.");
+      setSelectedKeys(new Set());
+      setEventNames({});
+      setExcludedImportKeys(new Set());
+      setItemProfileAssignments({});
+      setExpandedEventIndexes(new Set());
+      displayedScanRoot.current = null;
+      displayedWorkflowId.current = null;
+      setMessage(
+        l("Import plan was deleted.", "Plan importu został usunięty."),
+      );
+    } catch (error) {
+      setMessage(normalizeSettingsError(error).message);
+    } finally {
+      setImportActionPending(false);
+    }
+  }
+
+  async function removeWorkflow(workflow: PendingSourceWorkflow) {
+    if (
+      !window.confirm(
+        l(
+          `Delete the saved plan for ${workflow.displayName || "this card"}? Scan results and selections will be lost. No photos will be deleted.`,
+          `Usunąć zapisany plan dla ${workflow.displayName || "tej karty"}? Wyniki skanu i wybory zostaną utracone. Zdjęcia nie zostaną usunięte.`,
+        ),
+      )
+    )
+      return;
+    setImportActionPending(true);
+    try {
+      await deletePendingSourceWorkflow(workflow.sourceId);
+      setPendingWorkflows((current) =>
+        current.filter((candidate) => candidate.sourceId !== workflow.sourceId),
+      );
+      if (scanResult?.scan.root === workflow.scan?.scan.root) {
+        setScanResult(null);
+        setImportPlan(null);
+        displayedScanRoot.current = null;
+        displayedWorkflowId.current = null;
+      }
+      setMessage(
+        l("Import plan was deleted.", "Plan importu został usunięty."),
+      );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     } finally {
@@ -972,9 +1291,20 @@ export function SourceScanner({
     try {
       let cancelMode: "keepCompleted" | "rollbackSession" = "keepCompleted";
       if (action === "cancel") {
-        if (!window.confirm("Czy na pewno przerwać tę sesję importu?")) return;
+        if (
+          !window.confirm(
+            l(
+              "Cancel this import session?",
+              "Czy na pewno przerwać tę sesję importu?",
+            ),
+          )
+        )
+          return;
         cancelMode = window.confirm(
-          "Czy usunąć niezmienione pliki dodane przez tę sesję? Wybierz Anuluj, aby zachować ukończone pliki.",
+          l(
+            "Delete unchanged files added by this session? Choose Cancel to keep completed files.",
+            "Czy usunąć niezmienione pliki dodane przez tę sesję? Wybierz Anuluj, aby zachować ukończone pliki.",
+          ),
         )
           ? "rollbackSession"
           : "keepCompleted";
@@ -1003,7 +1333,12 @@ export function SourceScanner({
     setImportActionPending(true);
     try {
       setImportSession(await retryImportRollback(importSession.id));
-      setMessage("Ponowiono bezpieczne wycofanie sesji.");
+      setMessage(
+        l(
+          "Safe session rollback was retried.",
+          "Ponowiono bezpieczne wycofanie sesji.",
+        ),
+      );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     } finally {
@@ -1018,19 +1353,21 @@ export function SourceScanner({
       )}
       <section className="source-hero">
         <div>
-          <p className="section-label">ŹRÓDŁA MEDIÓW</p>
+          <p className="section-label">{l("MEDIA SOURCES", "ŹRÓDŁA MEDIÓW")}</p>
           <h2>
             {!discoveryComplete
               ? appStatus === "error"
-                ? "Źródła są niedostępne."
-                : "Sprawdzam dostępne źródła…"
+                ? l("Sources are unavailable.", "Źródła są niedostępne.")
+                : l("Checking available sources…", "Sprawdzam dostępne źródła…")
               : cameraSources.length > 0
-                ? "Wykryto nośnik aparatu."
-                : "Czekam na kartę pamięci."}
+                ? l("Camera media detected.", "Wykryto nośnik aparatu.")
+                : l("Waiting for a memory card.", "Czekam na kartę pamięci.")}
           </h2>
           <p>
-            Lista odświeża się co 5 sekund. Możesz też przeskanować dowolny
-            katalog lub zamontowany udział sieciowy.
+            {l(
+              "The list refreshes every 5 seconds. You can also scan any folder or mounted network share.",
+              "Lista odświeża się co 5 sekund. Możesz też przeskanować dowolny katalog lub zamontowany udział sieciowy.",
+            )}
           </p>
           <button
             type="button"
@@ -1042,7 +1379,7 @@ export function SourceScanner({
               appStatus === "error"
             }
           >
-            Wybierz katalog ręcznie
+            {l("Choose folder manually", "Wybierz katalog ręcznie")}
           </button>
           {message && (
             <p className="scan-message" role="status">
@@ -1056,15 +1393,15 @@ export function SourceScanner({
           </span>
           <strong>
             {discoveryComplete
-              ? "prawdopodobnych źródeł aparatu"
-              : "liczba źródeł jest nieznana"}
+              ? l("probable camera sources", "prawdopodobnych źródeł aparatu")
+              : l("source count is unknown", "liczba źródeł jest nieznana")}
           </strong>
           <span>
             {discoveryError
-              ? "Odczyt źródeł nie powiódł się"
+              ? l("Could not read sources", "Odczyt źródeł nie powiódł się")
               : discoveryComplete
-                ? "Lista źródeł jest aktualna"
-                : "Oczekiwanie na potwierdzenie"}
+                ? l("Source list is up to date", "Lista źródeł jest aktualna")
+                : l("Waiting for confirmation", "Oczekiwanie na potwierdzenie")}
           </span>
         </div>
       </section>
@@ -1074,39 +1411,6 @@ export function SourceScanner({
           error={describeOperationalError(discoveryError, "read")}
           onRetry={() => void refreshSources()}
         />
-      )}
-
-      {pendingWorkflows.length > 0 && (
-        <section className="source-list" aria-label="Trwałe zadania kart">
-          {pendingWorkflows.map((workflow) => (
-            <article className="source-card" key={workflow.sourceId}>
-              <div className="source-card__icon" aria-hidden="true">
-                SD
-              </div>
-              <div className="source-card__details">
-                <div className="source-card__title">
-                  <h3>{workflow.displayName || workflow.sourceRoot}</h3>
-                  <span className="known-badge">
-                    {workflowStateLabel(workflow.state)}
-                  </span>
-                </div>
-                <p>{workflow.sourceRoot}</p>
-                {workflow.plan && (
-                  <small>
-                    {workflow.plan.fileCount} plików ·{" "}
-                    {formatBytes(workflow.plan.totalSizeBytes)}
-                  </small>
-                )}
-                {workflow.error && <small>{workflow.error}</small>}
-              </div>
-              {workflow.scan && (
-                <button type="button" onClick={() => openWorkflow(workflow)}>
-                  {workflow.state === "planReady" ? "Otwórz plan" : "Otwórz"}
-                </button>
-              )}
-            </article>
-          ))}
-        </section>
       )}
 
       {scanJob?.status === "running" && (
@@ -1120,9 +1424,15 @@ export function SourceScanner({
       )}
 
       {cameraSources.length > 0 && (
-        <section className="source-list" aria-label="Wykryte nośniki">
+        <section
+          className="source-list"
+          aria-label={l("Detected media", "Wykryte nośniki")}
+        >
           {cameraSources.map((source) => {
             const profile = profileFor(source);
+            const workflow = pendingWorkflows.find((candidate) =>
+              workflowMatchesSource(candidate, source),
+            );
             return (
               <article
                 className="source-card"
@@ -1137,34 +1447,94 @@ export function SourceScanner({
                     {profile && (
                       <span className="known-badge">{profile.name}</span>
                     )}
+                    {workflow && (
+                      <span className="known-badge">
+                        {workflowStateLabel(workflow.state)}
+                      </span>
+                    )}
                   </div>
                   <p>
                     {source.mountPath} ·{" "}
-                    {source.fileSystem || "nieznany system"} ·{" "}
-                    {formatBytes(source.totalBytes)}
+                    {source.fileSystem ||
+                      l("unknown file system", "nieznany system")}{" "}
+                    · {formatBytes(source.totalBytes)}
                   </p>
                   <div className="source-flags">
-                    {source.removable && <span>wymienny</span>}
+                    {source.removable && (
+                      <span>{l("removable", "wymienny")}</span>
+                    )}
                     {source.containsDcim && <span>DCIM</span>}
-                    {source.readOnly && <span>tylko odczyt</span>}
+                    {source.readOnly && (
+                      <span>{l("read-only", "tylko odczyt")}</span>
+                    )}
                   </div>
                   {!profile && (
                     <small>
-                      Skan rozpozna aparat z EXIF przed zapamiętaniem karty.
+                      {l(
+                        "The scan will identify the camera from EXIF before remembering the card.",
+                        "Skan rozpozna aparat z EXIF przed zapamiętaniem karty.",
+                      )}
                     </small>
                   )}
                 </div>
-                <button
-                  type="button"
-                  onClick={() => void runScan(source.mountPath)}
-                  disabled={scanningPath !== null}
-                >
-                  {scanningPath === source.mountPath ? "Skanowanie…" : "Skanuj"}
-                </button>
+                <div className="source-card__actions">
+                  <button
+                    type="button"
+                    className="secondary"
+                    disabled={!workflow?.scan}
+                    onClick={() => workflow && openWorkflow(workflow)}
+                  >
+                    {l("Details", "Szczegóły")}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      void runScan(source.mountPath, undefined, source)
+                    }
+                    disabled={scanningPath !== null}
+                  >
+                    {scanningPath === source.mountPath
+                      ? l("Scanning…", "Skanowanie…")
+                      : l("Scan", "Skanuj")}
+                  </button>
+                  <button
+                    type="button"
+                    className="danger-quiet"
+                    disabled={!workflow || importActionPending}
+                    onClick={() => workflow && void removeWorkflow(workflow)}
+                  >
+                    {l("Delete", "Usuń")}
+                  </button>
+                  <button
+                    type="button"
+                    disabled={
+                      !workflow?.plan ||
+                      workflow.plan.status !== "ready" ||
+                      workflow.plan.conflicts.length > 0 ||
+                      importActionPending
+                    }
+                    onClick={() =>
+                      workflow?.plan &&
+                      workflow.scan &&
+                      void beginImport(workflow.plan, workflow.scan)
+                    }
+                  >
+                    {l("Start import", "Uruchom import")}
+                  </button>
+                </div>
               </article>
             );
           })}
         </section>
+      )}
+
+      {importSession && !scanResult && (
+        <ImportSessionProgress
+          session={importSession}
+          actionPending={importActionPending}
+          onControl={(action) => void controlImport(action)}
+          onRetryRollback={() => void retryRollback()}
+        />
       )}
 
       {scanResult && (
@@ -1205,12 +1575,23 @@ export function SourceScanner({
             excludedImportKeys={excludedImportKeys}
             onExcludedImportKeysChange={(keys) => {
               setExcludedImportKeys(keys);
-              invalidatePlan();
+              invalidatePlan({
+                eventNames,
+                excludedItemKeys: [...keys],
+                itemProfileAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
             }}
             eventNames={eventNames}
             onEventNameChange={(index, name) => {
-              setEventNames((current) => ({ ...current, [index]: name }));
-              invalidatePlan();
+              const nextEventNames = { ...eventNames, [index]: name };
+              setEventNames(nextEventNames);
+              invalidatePlan({
+                eventNames: nextEventNames,
+                excludedItemKeys: [...excludedImportKeys],
+                itemProfileAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
             }}
             expandedEventIndexes={expandedEventIndexes}
             onExpandedEventIndexesChange={updateExpandedEvents}
@@ -1229,11 +1610,17 @@ export function SourceScanner({
             cameraProfiles={settings?.portable.cameraProfiles ?? []}
             itemProfileAssignments={itemProfileAssignments}
             onItemProfileAssignment={(key, profileId) => {
-              setItemProfileAssignments((current) => ({
-                ...current,
+              const nextAssignments = {
+                ...itemProfileAssignments,
                 [key]: profileId,
-              }));
-              invalidatePlan();
+              };
+              setItemProfileAssignments(nextAssignments);
+              invalidatePlan({
+                eventNames,
+                excludedItemKeys: [...excludedImportKeys],
+                itemProfileAssignments: nextAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
             }}
           />
         </>
@@ -1249,9 +1636,17 @@ function ImportJourney({
   currentStep: number;
   finished: boolean;
 }) {
-  const steps = ["Źródło", "Przegląd", "Plan", "Import"];
+  const steps = [
+    l("Source", "Źródło"),
+    l("Review", "Przegląd"),
+    l("Plan", "Plan"),
+    l("Import", "Import"),
+  ];
   return (
-    <nav className="import-journey" aria-label="Etapy importu">
+    <nav
+      className="import-journey"
+      aria-label={l("Import steps", "Etapy importu")}
+    >
       <ol>
         {steps.map((label, index) => {
           const state =
@@ -1262,10 +1657,10 @@ function ImportJourney({
                 : "unavailable";
           const stateLabel =
             state === "completed"
-              ? "ukończony"
+              ? l("completed", "ukończony")
               : state === "current"
-                ? "bieżący"
-                : "niedostępny";
+                ? l("current", "bieżący")
+                : l("unavailable", "niedostępny");
           return (
             <li
               className={`import-journey__step import-journey__step--${state}`}
@@ -1314,11 +1709,20 @@ function CameraProfileConfirmation({
   }
   return (
     <section className="profile-confirmation" aria-live="polite">
-      <span className="section-label">ROZPOZNANE APARATY</span>
-      <h3>Zatwierdź profile przed przygotowaniem planu</h3>
+      <span className="section-label">
+        {l("DETECTED CAMERAS", "ROZPOZNANE APARATY")}
+      </span>
+      <h3>
+        {l(
+          "Approve profiles before preparing the plan",
+          "Zatwierdź profile przed przygotowaniem planu",
+        )}
+      </h3>
       <p>
-        Karta zostanie zapamiętana dopiero po tej decyzji. Możesz utworzyć nowy
-        profil, użyć istniejącego albo pozostawić materiały jako nieznane.
+        {l(
+          "The card will only be remembered after this decision. You can create a new profile, use an existing one, or leave the media unassigned.",
+          "Karta zostanie zapamiętana dopiero po tej decyzji. Możesz utworzyć nowy profil, użyć istniejącego albo pozostawić materiały jako nieznane.",
+        )}
       </p>
       <label className="setting-toggle">
         <input
@@ -1328,8 +1732,10 @@ function CameraProfileConfirmation({
           onChange={(event) => onWriteMarkerChange(event.target.checked)}
         />
         <span>
-          Zapisz na karcie prywatny identyfikator ułatwiający bezpieczne
-          rozpoznanie po zmianie litery dysku
+          {l(
+            "Save a private identifier on the card for safe recognition after its drive letter changes",
+            "Zapisz na karcie prywatny identyfikator ułatwiający bezpieczne rozpoznanie po zmianie litery dysku",
+          )}
         </span>
       </label>
       {drafts.map((draft) => (
@@ -1338,33 +1744,40 @@ function CameraProfileConfirmation({
             <strong>
               {[draft.identity.make, draft.identity.model]
                 .filter(Boolean)
-                .join(" ") || "Nieznany aparat"}
+                .join(" ") || l("Unknown camera", "Nieznany aparat")}
             </strong>
             <small>
-              {draft.itemCount} pozycji
+              {draft.itemCount} {l("items", "pozycji")}
               {draft.identity.serialNumber
                 ? ` · nr ${draft.identity.serialNumber}`
-                : " · brak numeru seryjnego"}
+                : l(" · no serial number", " · brak numeru seryjnego")}
             </small>
           </div>
           <select
-            aria-label="Przypisanie profilu aparatu"
+            aria-label={l(
+              "Camera profile assignment",
+              "Przypisanie profilu aparatu",
+            )}
             value={draft.profileId}
             onChange={(event) =>
               update(draft.key, { profileId: event.target.value })
             }
           >
-            <option value="new">Utwórz nowy profil</option>
+            <option value="new">
+              {l("Create a new profile", "Utwórz nowy profil")}
+            </option>
             {profiles.map((profile) => (
               <option value={profile.id} key={profile.id}>
                 {profile.name}
               </option>
             ))}
-            <option value="unknown">Pozostaw jako nieznany</option>
+            <option value="unknown">
+              {l("Leave unassigned", "Pozostaw jako nieznany")}
+            </option>
           </select>
           {draft.profileId === "new" && (
             <input
-              aria-label="Nazwa nowego profilu"
+              aria-label={l("New profile name", "Nazwa nowego profilu")}
               value={draft.name}
               onChange={(event) =>
                 update(draft.key, { name: event.target.value })
@@ -1374,7 +1787,10 @@ function CameraProfileConfirmation({
         </div>
       ))}
       <button type="button" onClick={onConfirm}>
-        Zatwierdź profile i zapamiętaj kartę
+        {l(
+          "Approve profiles and remember card",
+          "Zatwierdź profile i zapamiętaj kartę",
+        )}
       </button>
     </section>
   );
@@ -1511,9 +1927,38 @@ function ScanResults({
   ) {
     const next = new Set(excludedImportKeys);
     for (const item of event.items) {
-      if (matches.get(item.key)?.state === "imported") continue;
+      if (
+        matches.get(item.key)?.state === "imported" ||
+        metadataFor(item.key).rejected
+      )
+        continue;
       if (included) next.delete(item.key);
       else next.add(item.key);
+    }
+    onExcludedImportKeysChange(next);
+  }
+
+  const importableItemKeys = result.events.flatMap((event) =>
+    event.items
+      .filter(
+        (item) =>
+          matches.get(item.key)?.state !== "imported" &&
+          !metadataFor(item.key).rejected,
+      )
+      .map((item) => item.key),
+  );
+  const allEventsIncluded =
+    importableItemKeys.length > 0 &&
+    importableItemKeys.every((key) => !excludedImportKeys.has(key));
+  const noEventsIncluded = importableItemKeys.every((key) =>
+    excludedImportKeys.has(key),
+  );
+
+  function setAllEventsIncluded(included: boolean) {
+    const next = new Set(excludedImportKeys);
+    for (const key of importableItemKeys) {
+      if (included) next.delete(key);
+      else next.add(key);
     }
     onExcludedImportKeysChange(next);
   }
@@ -1556,63 +2001,83 @@ function ScanResults({
     <section className="scan-results">
       <header className="review-heading">
         <div>
-          <span className="section-label">NASTĘPNY KROK · PRZEGLĄD</span>
-          <h3>Przejrzyj wyniki skanu</h3>
-          <p>Sprawdź wydarzenia, popraw czas i zdecyduj, co uwzględnić.</p>
+          <span className="section-label">
+            {l("NEXT STEP · REVIEW", "NASTĘPNY KROK · PRZEGLĄD")}
+          </span>
+          <h3>{l("Review scan results", "Przejrzyj wyniki skanu")}</h3>
+          <p>
+            {l(
+              "Review events, correct time, and decide what to include.",
+              "Sprawdź wydarzenia, popraw czas i zdecyduj, co uwzględnić.",
+            )}
+          </p>
         </div>
-        {!importPlan && <strong>Potem przygotujesz plan importu</strong>}
+        {!importPlan && (
+          <strong>
+            {l(
+              "Next you'll prepare an import plan",
+              "Potem przygotujesz plan importu",
+            )}
+          </strong>
+        )}
       </header>
       <div className="scan-summary">
         <div>
-          <span>Pozycje</span>
+          <span>{l("Items", "Pozycje")}</span>
           <strong>{result.scan.items.length}</strong>
         </div>
         <div>
-          <span>Pliki</span>
+          <span>{l("Files", "Pliki")}</span>
           <strong>{result.scan.supportedFileCount}</strong>
         </div>
         <div>
-          <span>Rozmiar</span>
+          <span>{l("Size", "Rozmiar")}</span>
           <strong>{formatBytes(result.scan.totalSizeBytes)}</strong>
         </div>
         <div>
-          <span>Wydarzenia</span>
+          <span>{l("Events", "Wydarzenia")}</span>
           <strong>{result.events.length}</strong>
         </div>
         <div>
-          <span>Zaimportowane</span>
+          <span>{l("Imported", "Zaimportowane")}</span>
           <strong>{importedCount}</strong>
         </div>
       </div>
       <p className="timestamp-note">
-        Czas pochodzi z EXIF lub metadanych filmu; dla brakujących danych
-        używany jest czas modyfikacji. Przerwa wydarzenia:{" "}
+        {l(
+          "Time comes from EXIF or video metadata; file modification time is used when data is missing. Event gap:",
+          "Czas pochodzi z EXIF lub metadanych filmu; dla brakujących danych używany jest czas modyfikacji. Przerwa wydarzenia:",
+        )}{" "}
         {result.eventGapMinutes} min.
       </p>
       <div className="scan-tools">
-        <div className="result-filter" role="group" aria-label="Filtr wyników">
+        <div
+          className="result-filter"
+          role="group"
+          aria-label={l("Results filter", "Filtr wyników")}
+        >
           <button
             type="button"
             className={filter === "all" ? "active" : "ghost"}
             onClick={() => onFilterChange("all")}
           >
-            Wszystkie
+            {l("All", "Wszystkie")}
           </button>
           <button
             type="button"
             className={filter === "new" ? "active" : "ghost"}
             onClick={() => onFilterChange("new")}
           >
-            Tylko nowe
+            {l("New only", "Tylko nowe")}
           </button>
           <select
-            aria-label="Minimalna ocena"
+            aria-label={l("Minimum rating", "Minimalna ocena")}
             value={ratingFilter}
             onChange={(event) =>
               onRatingFilterChange(Number(event.target.value))
             }
           >
-            <option value={0}>Dowolna ocena</option>
+            <option value={0}>{l("Any rating", "Dowolna ocena")}</option>
             {[1, 2, 3, 4, 5].map((rating) => (
               <option value={rating} key={rating}>
                 {rating}+ ★
@@ -1620,7 +2085,7 @@ function ScanResults({
             ))}
           </select>
           <select
-            aria-label="Status odrzucenia"
+            aria-label={l("Rejection status", "Status odrzucenia")}
             value={rejectionFilter}
             onChange={(event) =>
               onRejectionFilterChange(
@@ -1628,15 +2093,19 @@ function ScanResults({
               )
             }
           >
-            <option value="all">Każdy status</option>
-            <option value="kept">Bez odrzuconych</option>
-            <option value="rejected">Do odrzucenia</option>
+            <option value="all">{l("Any status", "Każdy status")}</option>
+            <option value="kept">
+              {l("Without rejected", "Bez odrzuconych")}
+            </option>
+            <option value="rejected">{l("Rejected", "Do odrzucenia")}</option>
           </select>
         </div>
         <div className="time-correction">
-          <strong>{selectedKeys.size} zaznaczonych</strong>
+          <strong>
+            {selectedKeys.size} {l("selected", "zaznaczonych")}
+          </strong>
           <input
-            aria-label="Wartość korekty czasu"
+            aria-label={l("Time correction value", "Wartość korekty czasu")}
             type="number"
             value={correctionValue}
             onChange={(event) =>
@@ -1644,7 +2113,7 @@ function ScanResults({
             }
           />
           <select
-            aria-label="Jednostka korekty czasu"
+            aria-label={l("Time correction unit", "Jednostka korekty czasu")}
             value={correctionUnit}
             onChange={(event) =>
               onCorrectionUnitChange(
@@ -1652,9 +2121,9 @@ function ScanResults({
               )
             }
           >
-            <option value="seconds">sekundy</option>
-            <option value="minutes">minuty</option>
-            <option value="hours">godziny</option>
+            <option value="seconds">{l("seconds", "sekundy")}</option>
+            <option value="minutes">{l("minutes", "minuty")}</option>
+            <option value="hours">{l("hours", "godziny")}</option>
           </select>
           <button
             type="button"
@@ -1662,7 +2131,7 @@ function ScanResults({
             onClick={onApplyCorrection}
             disabled={busy || selectedKeys.size === 0}
           >
-            Zastosuj korektę
+            {l("Apply correction", "Zastosuj korektę")}
           </button>
           {selectedKeys.size > 0 && (
             <button
@@ -1670,7 +2139,7 @@ function ScanResults({
               className="ghost"
               onClick={() => onSelectionChange(new Set())}
             >
-              Wyczyść
+              {l("Clear", "Wyczyść")}
             </button>
           )}
         </div>
@@ -1678,11 +2147,17 @@ function ScanResults({
       {selectedKeys.size > 0 && (
         <div
           className="metadata-bulk"
-          aria-label="Operacje zbiorcze metadanych"
+          aria-label={l(
+            "Bulk metadata operations",
+            "Operacje zbiorcze metadanych",
+          )}
         >
-          <strong>Metadane dla {selectedKeys.size} pozycji:</strong>
+          <strong>
+            {l("Metadata for", "Metadane dla")} {selectedKeys.size}{" "}
+            {l("items", "pozycji")}:
+          </strong>
           <select
-            aria-label="Ustaw ocenę zaznaczonych"
+            aria-label={l("Rate selected items", "Ustaw ocenę zaznaczonych")}
             defaultValue=""
             onChange={(event) => {
               if (event.target.value === "") return;
@@ -1692,7 +2167,7 @@ function ScanResults({
             }}
           >
             <option value="" disabled>
-              Ustaw ocenę…
+              {l("Set rating…", "Ustaw ocenę…")}
             </option>
             {[0, 1, 2, 3, 4, 5].map((rating) => (
               <option value={rating} key={rating}>
@@ -1705,14 +2180,14 @@ function ScanResults({
             className="ghost"
             onClick={() => updateSelected(() => ({ rejected: true }))}
           >
-            Odrzuć
+            {l("Reject", "Odrzuć")}
           </button>
           <button
             type="button"
             className="ghost"
             onClick={() => updateSelected(() => ({ rejected: false }))}
           >
-            Przywróć
+            {l("Restore", "Przywróć")}
           </button>
           <button
             type="button"
@@ -1724,22 +2199,39 @@ function ScanResults({
               }))
             }
           >
-            Obróć o 90°
+            {l("Rotate 90°", "Obróć o 90°")}
           </button>
         </div>
       )}
       <div
         className="event-list-controls"
         role="group"
-        aria-label="Widok wydarzeń"
+        aria-label={l("Event operations", "Operacje na wydarzeniach")}
       >
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => setAllEventsIncluded(true)}
+          disabled={allEventsIncluded || importableItemKeys.length === 0}
+        >
+          {l("Select all events", "Zaznacz wszystkie wydarzenia")}
+        </button>
+        <button
+          type="button"
+          className="ghost"
+          onClick={() => setAllEventsIncluded(false)}
+          disabled={noEventsIncluded || importableItemKeys.length === 0}
+        >
+          {l("Deselect all events", "Odznacz wszystkie wydarzenia")}
+        </button>
+        <span className="event-list-controls__spacer" aria-hidden="true" />
         <button
           type="button"
           className="ghost"
           onClick={() => onExpandedEventIndexesChange(new Set())}
           disabled={expandedEventIndexes.size === 0}
         >
-          Zwiń wszystkie
+          {l("Collapse all", "Zwiń wszystkie")}
         </button>
         <button
           type="button"
@@ -1753,16 +2245,33 @@ function ScanResults({
             expandedEventIndexes.has(event.index),
           )}
         >
-          Rozwiń wszystkie
+          {l("Expand all", "Rozwiń wszystkie")}
         </button>
       </div>
       <div className="event-list">
         {visibleEvents.map((event) => {
           const expanded = expandedEventIndexes.has(event.index);
+          const importableItems = event.items.filter(
+            (item) =>
+              matches.get(item.key)?.state !== "imported" &&
+              !metadataFor(item.key).rejected,
+          );
+          const includedImportItemCount = importableItems.filter(
+            (item) => !excludedImportKeys.has(item.key),
+          ).length;
+          const entireEventIncluded =
+            importableItems.length > 0 &&
+            includedImportItemCount === importableItems.length;
+          const eventPartiallyIncluded =
+            includedImportItemCount > 0 && !entireEventIncluded;
+          const allEventItemsSelected = event.items.every((item) =>
+            selectedKeys.has(item.key),
+          );
           const headingId = `event-${event.index}-heading`;
           const contentId = `event-${event.index}-content`;
           const eventName =
-            eventNames[event.index]?.trim() || `Wydarzenie ${event.index}`;
+            eventNames[event.index]?.trim() ||
+            l(`Event ${event.index}`, `Wydarzenie ${event.index}`);
           return (
             <article
               className={`event-card ${expanded ? "event-card--expanded" : "event-card--collapsed"}`}
@@ -1775,7 +2284,10 @@ function ScanResults({
                 tabIndex={0}
                 aria-expanded={expanded}
                 aria-controls={contentId}
-                aria-label={`${expanded ? "Zwiń" : "Rozwiń"} wydarzenie ${eventName}`}
+                aria-label={l(
+                  `${expanded ? "Collapse" : "Expand"} event ${eventName}`,
+                  `${expanded ? "Zwiń" : "Rozwiń"} wydarzenie ${eventName}`,
+                )}
                 onClick={(click) => {
                   if (!headingContainsControl(click.target))
                     toggleEvent(event.index);
@@ -1790,6 +2302,13 @@ function ScanResults({
                   }
                 }}
               >
+                <EventImportCheckbox
+                  checked={entireEventIncluded}
+                  indeterminate={eventPartiallyIncluded}
+                  disabled={importableItems.length === 0}
+                  eventName={eventName}
+                  onChange={() => setEventIncluded(event, !entireEventIncluded)}
+                />
                 {!expanded && (
                   <div className="event-card__thumbnail">
                     <MediaThumbnail
@@ -1802,7 +2321,9 @@ function ScanResults({
                   </div>
                 )}
                 <div className="event-card__identity">
-                  <span>WYDARZENIE {event.index}</span>
+                  <span>
+                    {l("EVENT", "WYDARZENIE")} {event.index}
+                  </span>
                   {expanded ? (
                     <>
                       <h3>
@@ -1812,7 +2333,7 @@ function ScanResults({
                         )}
                       </h3>
                       <label className="event-name-field">
-                        <span>Nazwa folderu</span>
+                        <span>{l("Folder name", "Nazwa folderu")}</span>
                         <input
                           value={eventNames[event.index] ?? ""}
                           onChange={(change) =>
@@ -1833,39 +2354,38 @@ function ScanResults({
                     </>
                   )}
                 </div>
-                {expanded && (
-                  <div className="event-card__actions">
-                    <strong>
-                      {event.items.length} pozycji ·{" "}
-                      {formatBytes(event.totalSizeBytes)}
-                    </strong>
-                    <button
-                      type="button"
-                      className="ghost"
-                      onClick={() => {
-                        const next = new Set(selectedKeys);
-                        for (const item of event.items) next.add(item.key);
-                        onSelectionChange(next);
-                      }}
-                    >
-                      Zaznacz wydarzenie
-                    </button>
-                    <label className="event-import-toggle">
-                      <input
-                        type="checkbox"
-                        checked={event.items.some(
-                          (item) =>
-                            matches.get(item.key)?.state !== "imported" &&
-                            !excludedImportKeys.has(item.key),
-                        )}
-                        onChange={(change) =>
-                          setEventIncluded(event, change.target.checked)
-                        }
-                      />
-                      uwzględnij w imporcie
-                    </label>
-                  </div>
-                )}
+                <div className="event-card__actions">
+                  {expanded && (
+                    <>
+                      <strong>
+                        {event.items.length} {l("items", "pozycji")} ·{" "}
+                        {formatBytes(event.totalSizeBytes)}
+                      </strong>
+                      <button
+                        type="button"
+                        className="ghost"
+                        onClick={() => {
+                          const next = new Set(selectedKeys);
+                          for (const item of event.items) {
+                            if (allEventItemsSelected) next.delete(item.key);
+                            else next.add(item.key);
+                          }
+                          onSelectionChange(next);
+                        }}
+                      >
+                        {allEventItemsSelected
+                          ? l(
+                              "Deselect event for editing",
+                              "Odznacz edycję wydarzenia",
+                            )
+                          : l(
+                              "Select event for editing",
+                              "Zaznacz wydarzenie do edycji",
+                            )}
+                      </button>
+                    </>
+                  )}
+                </div>
                 <span className="event-card__chevron" aria-hidden="true">
                   {expanded ? "⌃" : "⌄"}
                 </span>
@@ -1901,7 +2421,10 @@ function ScanResults({
                           rotation={metadata.rotationDegrees}
                         />
                         <input
-                          aria-label="Zaznacz do korekty czasu"
+                          aria-label={l(
+                            "Select for time correction",
+                            "Zaznacz do korekty czasu",
+                          )}
                           type="checkbox"
                           checked={selectedKeys.has(item.key)}
                           onClick={(event) => event.stopPropagation()}
@@ -1918,7 +2441,7 @@ function ScanResults({
                         </strong>
                         <div className="media-tile__metadata">
                           <select
-                            aria-label="Ocena zdjęcia"
+                            aria-label={l("Photo rating", "Ocena zdjęcia")}
                             value={metadata.rating}
                             onClick={(event) => event.stopPropagation()}
                             onChange={(event) =>
@@ -1944,17 +2467,22 @@ function ScanResults({
                               });
                             }}
                           >
-                            {metadata.rejected ? "Przywróć" : "Odrzuć"}
+                            {metadata.rejected
+                              ? l("Restore", "Przywróć")
+                              : l("Reject", "Odrzuć")}
                           </button>
                         </div>
                         <small>
                           {item.hasRawJpegPair
                             ? "RAW+JPEG"
-                            : `${item.files.length} plik`}
+                            : `${item.files.length} ${l("file(s)", "plik")}`}
                           {item.hasSidecar ? " + XMP" : ""}
                         </small>
                         <select
-                          aria-label="Profil aparatu dla pozycji"
+                          aria-label={l(
+                            "Camera profile for item",
+                            "Profil aparatu dla pozycji",
+                          )}
                           value={itemProfileAssignments[item.key] ?? "unknown"}
                           onClick={(event) => event.stopPropagation()}
                           onChange={(event) =>
@@ -1964,7 +2492,9 @@ function ScanResults({
                             )
                           }
                         >
-                          <option value="unknown">Nieznany aparat</option>
+                          <option value="unknown">
+                            {l("Unknown camera", "Nieznany aparat")}
+                          </option>
                           {cameraProfiles.map((profile) => (
                             <option value={profile.id} key={profile.id}>
                               {profile.name}
@@ -1974,12 +2504,18 @@ function ScanResults({
                         <small>
                           {timeSourceLabel(item.timeSource)}
                           {item.timeCorrectionSeconds !== 0
-                            ? ` · korekta ${item.timeCorrectionSeconds}s`
+                            ? l(
+                                ` · correction ${item.timeCorrectionSeconds}s`,
+                                ` · korekta ${item.timeCorrectionSeconds}s`,
+                              )
                             : ""}
                         </small>
                         <small>
                           {item.cameraMetadataConflict
-                            ? "sprzeczne dane aparatu"
+                            ? l(
+                                "conflicting camera data",
+                                "sprzeczne dane aparatu",
+                              )
                             : item.cameraIdentity
                               ? [
                                   item.cameraIdentity.make,
@@ -1987,13 +2523,16 @@ function ScanResults({
                                 ]
                                   .filter(Boolean)
                                   .join(" ")
-                              : "Nieznany aparat"}
+                              : l("Unknown camera", "Nieznany aparat")}
                         </small>
                         {importMatch?.state !== "new" && (
                           <span className="import-state">
                             {importMatch?.state === "imported"
-                              ? "już importowane"
-                              : "częściowo importowane"}
+                              ? l("already imported", "już importowane")
+                              : l(
+                                  "partially imported",
+                                  "częściowo importowane",
+                                )}
                           </span>
                         )}
                         <button
@@ -2006,10 +2545,10 @@ function ScanResults({
                           }}
                         >
                           {importMatch?.state === "imported"
-                            ? "pominięte"
+                            ? l("skipped", "pominięte")
                             : excludedImportKeys.has(item.key)
-                              ? "dodaj do planu"
-                              : "pomiń w planie"}
+                              ? l("add to plan", "dodaj do planu")
+                              : l("skip in plan", "pomiń w planie")}
                         </button>
                       </div>
                     );
@@ -2044,11 +2583,20 @@ function ScanResults({
       <section className="import-planner">
         <div className="import-planner__heading">
           <div>
-            <span className="section-label">PLAN IMPORTU</span>
-            <h3>Sprawdź ścieżki przed kopiowaniem</h3>
+            <span className="section-label">
+              {l("IMPORT PLAN", "PLAN IMPORTU")}
+            </span>
+            <h3>
+              {l(
+                "Review paths before copying",
+                "Sprawdź ścieżki przed kopiowaniem",
+              )}
+            </h3>
             <p>
-              Ten krok tylko oblicza wynik. Nie tworzy folderów i nie kopiuje
-              żadnych plików.
+              {l(
+                "This step only calculates the result. It doesn't create folders or copy any files.",
+                "Ten krok tylko oblicza wynik. Nie tworzy folderów i nie kopiuje żadnych plików.",
+              )}
             </p>
           </div>
           <div className="import-planner__actions">
@@ -2061,7 +2609,7 @@ function ScanResults({
                   onClick={onDeleteImportPlan}
                   disabled={planning || busy || importActionPending}
                 >
-                  Usuń plan
+                  {l("Delete plan", "Usuń plan")}
                 </button>
               )}
             <button
@@ -2071,10 +2619,10 @@ function ScanResults({
               disabled={planning || busy}
             >
               {planning
-                ? "Przygotowywanie…"
+                ? l("Preparing…", "Przygotowywanie…")
                 : importPlan
-                  ? "Odśwież plan"
-                  : "Przygotuj plan"}
+                  ? l("Refresh plan", "Odśwież plan")
+                  : l("Prepare plan", "Przygotuj plan")}
             </button>
           </div>
         </div>
@@ -2110,7 +2658,10 @@ function ScanResults({
       </section>
       {result.scan.warnings.length > 0 && (
         <details className="scan-warnings">
-          <summary>{result.scan.warnings.length} ostrzeżeń skanowania</summary>
+          <summary>
+            {result.scan.warnings.length}{" "}
+            {l("scan warnings", "ostrzeżeń skanowania")}
+          </summary>
           {result.scan.warnings.map((warning) => (
             <p key={`${warning.path}-${warning.message}`}>
               {warning.path}: {warning.message}
@@ -2119,6 +2670,49 @@ function ScanResults({
         </details>
       )}
     </section>
+  );
+}
+
+function EventImportCheckbox({
+  checked,
+  indeterminate,
+  disabled,
+  eventName,
+  onChange,
+}: {
+  checked: boolean;
+  indeterminate: boolean;
+  disabled: boolean;
+  eventName: string;
+  onChange: () => void;
+}) {
+  const input = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (input.current) input.current.indeterminate = indeterminate;
+  }, [indeterminate]);
+
+  return (
+    <label
+      className="event-import-toggle"
+      title={l(
+        `Include the entire ${eventName} event in the import`,
+        `Uwzględnij całe wydarzenie ${eventName} w imporcie`,
+      )}
+    >
+      <input
+        ref={input}
+        type="checkbox"
+        checked={checked}
+        disabled={disabled}
+        aria-checked={indeterminate ? "mixed" : checked}
+        aria-label={l(
+          `Include the entire ${eventName} event in the import`,
+          `Uwzględnij całe wydarzenie ${eventName} w imporcie`,
+        )}
+        onChange={onChange}
+      />
+    </label>
   );
 }
 
@@ -2140,32 +2734,47 @@ function ScanProgressPanel({
   return (
     <section className="scan-progress-panel" aria-live="polite">
       <div>
-        <span className="section-label">SKANOWANIE</span>
+        <span className="section-label">{l("SCANNING", "SKANOWANIE")}</span>
         <h3>{scanPhaseLabel(job.phase)}</h3>
         <p>
           {job.phase === "discovering"
-            ? `${job.discoveredFileCount} znalezionych plików`
-            : `${job.processedFileCount} z ${job.totalSupportedFileCount ?? "?"} obsługiwanych plików`}
+            ? l(
+                `${job.discoveredFileCount} files found`,
+                `${job.discoveredFileCount} znalezionych plików`,
+              )
+            : l(
+                `${job.processedFileCount} of ${job.totalSupportedFileCount ?? "?"} supported files`,
+                `${job.processedFileCount} z ${job.totalSupportedFileCount ?? "?"} obsługiwanych plików`,
+              )}
           {job.currentPath ? ` · ${displayFileName(job.currentPath)}` : ""}
         </p>
         <small>
           {job.phase === "comparingHistory"
-            ? `${formatBytes(job.historyBytesRead)} odczytano · ${job.historyCacheHitCount} z cache · ${job.fullyHashedFileCount} pełnych odczytów`
-            : "Duże karty i pliki RAW mogą wymagać kilku minut. Możesz chwilę poczekać albo anulować skanowanie."}
+            ? l(
+                `${formatBytes(job.historyBytesRead)} read · ${job.historyCacheHitCount} cached · ${job.fullyHashedFileCount} full reads`,
+                `${formatBytes(job.historyBytesRead)} odczytano · ${job.historyCacheHitCount} z cache · ${job.fullyHashedFileCount} pełnych odczytów`,
+              )
+            : l(
+                "Large cards and RAW files may take several minutes. You can wait or cancel scanning.",
+                "Duże karty i pliki RAW mogą wymagać kilku minut. Możesz chwilę poczekać albo anulować skanowanie.",
+              )}
         </small>
       </div>
       <div
         className={`scan-progress-track ${determinate ? "" : "scan-progress-track--indeterminate"}`}
         aria-label={
           determinate
-            ? `Postęp ${percentage.toFixed(0)}%`
-            : "Wyszukiwanie plików"
+            ? l(
+                `Progress ${percentage.toFixed(0)}%`,
+                `Postęp ${percentage.toFixed(0)}%`,
+              )
+            : l("Searching for files", "Wyszukiwanie plików")
         }
       >
         <span style={determinate ? { width: `${percentage}%` } : undefined} />
       </div>
       <button type="button" className="ghost" onClick={onCancel}>
-        Anuluj skanowanie
+        {l("Cancel scanning", "Anuluj skanowanie")}
       </button>
     </section>
   );
@@ -2175,12 +2784,17 @@ function StreamingScanPreview({ items }: { items: MediaItem[] }) {
   return (
     <section
       className="streaming-scan-preview"
-      aria-label="Zdjęcia znalezione podczas skanowania"
+      aria-label={l(
+        "Photos found while scanning",
+        "Zdjęcia znalezione podczas skanowania",
+      )}
     >
       <div className="streaming-scan-preview__heading">
         <div>
-          <span className="section-label">PODGLĄD NA ŻYWO</span>
-          <h3>Znalezione zdjęcia</h3>
+          <span className="section-label">
+            {l("LIVE PREVIEW", "PODGLĄD NA ŻYWO")}
+          </span>
+          <h3>{l("Photos found", "Znalezione zdjęcia")}</h3>
         </div>
         <strong>{items.length}</strong>
       </div>
@@ -2278,10 +2892,10 @@ function MediaThumbnail({
       ) : (
         <span>
           {failed
-            ? "brak podglądu"
+            ? l("preview unavailable", "brak podglądu")
             : source?.kind === "video"
-              ? "WIDEO"
-              : "ładowanie…"}
+              ? l("VIDEO", "WIDEO")
+              : l("loading…", "ładowanie…")}
         </span>
       )}
     </div>
@@ -2326,7 +2940,7 @@ function FullMediaPreview({
       className="preview-overlay"
       role="dialog"
       aria-modal="true"
-      aria-label="Podgląd zdjęcia"
+      aria-label={l("Photo preview", "Podgląd zdjęcia")}
     >
       <div className="preview-dialog">
         <div className="preview-toolbar">
@@ -2335,7 +2949,10 @@ function FullMediaPreview({
           </strong>
           <div>
             <select
-              aria-label="Ocena zdjęcia w podglądzie"
+              aria-label={l(
+                "Photo rating in preview",
+                "Ocena zdjęcia w podglądzie",
+              )}
               value={metadata.rating}
               onChange={(event) =>
                 onMetadataChange({ rating: Number(event.target.value) })
@@ -2353,17 +2970,19 @@ function FullMediaPreview({
               aria-pressed={metadata.rejected}
               onClick={() => onMetadataChange({ rejected: !metadata.rejected })}
             >
-              {metadata.rejected ? "Przywróć" : "Odrzuć"}
+              {metadata.rejected
+                ? l("Restore", "Przywróć")
+                : l("Reject", "Odrzuć")}
             </button>
             <button
               type="button"
               className="ghost"
               onClick={() => setScale((value) => Math.min(3, value + 0.25))}
             >
-              Powiększ
+              {l("Zoom in", "Powiększ")}
             </button>
             <button type="button" className="ghost" onClick={() => setScale(1)}>
-              Dopasuj
+              {l("Fit", "Dopasuj")}
             </button>
             <button
               type="button"
@@ -2375,10 +2994,10 @@ function FullMediaPreview({
                 })
               }
             >
-              Obróć o 90°
+              {l("Rotate 90°", "Obróć o 90°")}
             </button>
             <button type="button" className="ghost" onClick={onClose}>
-              Zamknij
+              {l("Close", "Zamknij")}
             </button>
           </div>
         </div>
@@ -2420,7 +3039,7 @@ function FullMediaPreview({
             disabled={position <= 1}
             onClick={onPrevious}
           >
-            Poprzednie
+            {l("Previous", "Poprzednie")}
           </button>
           <button
             type="button"
@@ -2428,7 +3047,7 @@ function FullMediaPreview({
             disabled={position >= total}
             onClick={onNext}
           >
-            Następne
+            {l("Next", "Następne")}
           </button>
         </div>
       </div>
@@ -2478,7 +3097,11 @@ function OriginalJpegPreview({
           style={{ transform: `rotate(${rotation}deg) scale(${scale})` }}
         />
       ) : (
-        <span>{failed ? "brak podglądu" : "ładowanie oryginału…"}</span>
+        <span>
+          {failed
+            ? l("preview unavailable", "brak podglądu")
+            : l("loading original…", "ładowanie oryginału…")}
+        </span>
       )}
     </div>
   );
@@ -2495,11 +3118,18 @@ function previewSource(item: MediaItem) {
 }
 
 function scanPhaseLabel(phase: MediaScanJob["phase"]) {
-  if (phase === "discovering") return "Wyszukiwanie zdjęć i filmów";
-  if (phase === "readingMetadata") return "Odczytywanie metadanych";
-  if (phase === "comparingHistory") return "Porównywanie z historią importu";
-  if (phase === "groupingEvents") return "Składanie wydarzeń";
-  return "Skanowanie zakończone";
+  if (phase === "discovering")
+    return l("Searching for photos and videos", "Wyszukiwanie zdjęć i filmów");
+  if (phase === "readingMetadata")
+    return l("Reading metadata", "Odczytywanie metadanych");
+  if (phase === "comparingHistory")
+    return l(
+      "Comparing with import history",
+      "Porównywanie z historią importu",
+    );
+  if (phase === "groupingEvents")
+    return l("Grouping events", "Składanie wydarzeń");
+  return l("Scanning complete", "Skanowanie zakończone");
 }
 
 function ImportPlanPreview({
@@ -2532,14 +3162,18 @@ function ImportPlanPreview({
   >();
   for (const event of plan.events) {
     const aliases = new Set(
-      event.items.map((item) => item.cameraAlias ?? "Nieznany aparat"),
+      event.items.map(
+        (item) => item.cameraAlias ?? l("Unknown camera", "Nieznany aparat"),
+      ),
     );
     for (const alias of aliases) {
       const sections = cameraSections.get(alias) ?? [];
       sections.push({
         event,
         items: event.items.filter(
-          (item) => (item.cameraAlias ?? "Nieznany aparat") === alias,
+          (item) =>
+            (item.cameraAlias ?? l("Unknown camera", "Nieznany aparat")) ===
+            alias,
         ),
       });
       cameraSections.set(alias, sections);
@@ -2549,55 +3183,70 @@ function ImportPlanPreview({
     <div className="plan-preview">
       <div className="plan-preview__heading">
         <div>
-          <span className="section-label">PODSUMOWANIE PRZED IMPORTEM</span>
-          <h3>Sprawdź konsekwencje operacji</h3>
+          <span className="section-label">
+            {l("PRE-IMPORT SUMMARY", "PODSUMOWANIE PRZED IMPORTEM")}
+          </span>
+          <h3>
+            {l(
+              "Review the operation's effects",
+              "Sprawdź konsekwencje operacji",
+            )}
+          </h3>
         </div>
         <span
           className={`plan-readiness plan-readiness--${plan.status}`}
           role="status"
         >
           {plan.status === "ready"
-            ? "Gotowy do zatwierdzenia"
+            ? l("Ready for approval", "Gotowy do zatwierdzenia")
             : plan.status === "empty"
-              ? "Brak plików do importu"
-              : "Wymaga uwagi"}
+              ? l("No files to import", "Brak plików do importu")
+              : l("Needs attention", "Wymaga uwagi")}
         </span>
       </div>
       <div className="plan-summary">
         <div>
-          <span>Nowe pozycje</span>
+          <span>{l("New items", "Nowe pozycje")}</span>
           <strong>{newItemCount}</strong>
         </div>
         <div>
-          <span>Pominięte pozycje</span>
+          <span>{l("Skipped items", "Pominięte pozycje")}</span>
           <strong>{skippedItemCount}</strong>
         </div>
         <div>
-          <span>Rozmiar danych</span>
+          <span>{l("Data size", "Rozmiar danych")}</span>
           <strong>{formatBytes(plan.totalSizeBytes)}</strong>
         </div>
         <div>
-          <span>Konflikty</span>
+          <span>{l("Conflicts", "Konflikty")}</span>
           <strong>{plan.conflicts.length}</strong>
         </div>
         <div>
-          <span>Operacja</span>
-          <strong>{riskyOperation ? "Przenoszenie" : "Kopiowanie"}</strong>
+          <span>{l("Operation", "Operacja")}</span>
+          <strong>
+            {riskyOperation
+              ? l("Moving", "Przenoszenie")
+              : l("Copying", "Kopiowanie")}
+          </strong>
         </div>
         <div>
-          <span>Pliki do importu</span>
+          <span>{l("Files to import", "Pliki do importu")}</span>
           <strong>{plan.fileCount}</strong>
         </div>
       </div>
       <p className="plan-library">
-        Katalog docelowy: <code>{plan.libraryRoot}</code>
+        {l("Destination folder", "Katalog docelowy")}:{" "}
+        <code>{plan.libraryRoot}</code>
       </p>
       {(scanWarnings.length > 0 || riskyOperation) && (
         <div className="plan-attention" role="alert">
-          <strong>Wymaga uwagi</strong>
+          <strong>{l("Needs attention", "Wymaga uwagi")}</strong>
           {riskyOperation && (
             <p>
-              Po weryfikacji całych zestawów pliki źródłowe zostaną usunięte.
+              {l(
+                "After complete sets are verified, source files will be deleted.",
+                "Po weryfikacji całych zestawów pliki źródłowe zostaną usunięte.",
+              )}
             </p>
           )}
           {scanWarnings.map((warning) => (
@@ -2609,16 +3258,23 @@ function ImportPlanPreview({
       )}
       {plan.conflicts.length > 0 && (
         <div className="plan-conflicts" role="alert">
-          <strong>{plan.conflicts.length} kolizji</strong>
+          <strong>
+            {plan.conflicts.length} {l("conflicts", "kolizji")}
+          </strong>
           <p>
-            Import pozostanie zatrzymany. Pomiń wskazane pozycje albo wybierz w
-            ustawieniach automatyczne dodawanie numeru i odśwież plan.
+            {l(
+              "Import will remain stopped. Skip the indicated items or enable automatic numbering in settings and refresh the plan.",
+              "Import pozostanie zatrzymany. Pomiń wskazane pozycje albo wybierz w ustawieniach automatyczne dodawanie numeru i odśwież plan.",
+            )}
           </p>
           {plan.conflicts.map((conflict) => (
             <p key={`${conflict.itemKey}-${conflict.destinationPath}`}>
               {conflict.kind === "destinationExists"
-                ? "Plik już istnieje"
-                : "Dwie pozycje wskazują tę samą ścieżkę"}
+                ? l("File already exists", "Plik już istnieje")
+                : l(
+                    "Two items use the same path",
+                    "Dwie pozycje wskazują tę samą ścieżkę",
+                  )}
               : <code>{conflict.destinationPath}</code>
             </p>
           ))}
@@ -2637,7 +3293,7 @@ function ImportPlanPreview({
                   <span>{event.eventName}</span>
                   <code>{event.folderRelativePath}</code>
                   <small>
-                    {items.length} pozycji ·{" "}
+                    {items.length} {l("items", "pozycji")} ·{" "}
                     {formatBytes(
                       items.reduce((sum, item) => sum + item.totalSizeBytes, 0),
                     )}
@@ -2670,7 +3326,10 @@ function ImportPlanPreview({
               checked={riskConfirmed}
               onChange={(event) => setRiskConfirmed(event.target.checked)}
             />
-            Rozumiem, że po weryfikacji pliki źródłowe zostaną usunięte
+            {l(
+              "I understand that source files will be deleted after verification",
+              "Rozumiem, że po weryfikacji pliki źródłowe zostaną usunięte",
+            )}
           </label>
         )}
         <button
@@ -2684,7 +3343,9 @@ function ImportPlanPreview({
             (riskyOperation && !riskConfirmed)
           }
         >
-          {actionPending ? "Uruchamianie…" : "Rozpocznij import"}
+          {actionPending
+            ? l("Starting…", "Uruchamianie…")
+            : l("Start import", "Rozpocznij import")}
         </button>
       </div>
     </div>
@@ -2726,29 +3387,36 @@ function ImportSessionProgress({
     <section className="import-progress-panel" aria-live="polite">
       <div className="import-progress-panel__heading">
         <div>
-          <span className="section-label">SESJA IMPORTU</span>
+          <span className="section-label">
+            {l("IMPORT SESSION", "SESJA IMPORTU")}
+          </span>
           <h3>{sessionStatusLabel(session.status)}</h3>
         </div>
         <strong>
-          {session.completedItemCount}/{session.itemCount} zestawów ·{" "}
-          {session.completedFileCount}/{session.fileCount} plików
+          {session.completedItemCount}/{session.itemCount}{" "}
+          {l("sets", "zestawów")} · {session.completedFileCount}/
+          {session.fileCount} {l("files", "plików")}
         </strong>
       </div>
       <div
         className="progress-track"
-        aria-label={`Postęp ${percentage.toFixed(0)}%`}
+        aria-label={l(
+          `Progress ${percentage.toFixed(0)}%`,
+          `Postęp ${percentage.toFixed(0)}%`,
+        )}
       >
         <span style={{ width: `${percentage}%` }} />
       </div>
       <p>
-        {formatBytes(session.completedSizeBytes)} z{" "}
+        {formatBytes(session.completedSizeBytes)} {l("of", "z")}{" "}
         {formatBytes(session.totalSizeBytes)}
         {current ? ` · ${displayFileName(current.sourcePath)}` : ""}
       </p>
       {bytesPerSecond > 0 && session.status === "running" && (
         <p>
-          Średnio {formatBytes(bytesPerSecond)}/s · około{" "}
-          {formatDuration(remainingSeconds)} do końca
+          {l("Average", "Średnio")} {formatBytes(bytesPerSecond)}/s ·{" "}
+          {l("about", "około")} {formatDuration(remainingSeconds)}{" "}
+          {l("remaining", "do końca")}
         </p>
       )}
       {session.lastError && <p className="import-error">{session.lastError}</p>}
@@ -2761,8 +3429,11 @@ function ImportSessionProgress({
             onClick={() => onControl("pause")}
           >
             {session.pauseRequested
-              ? "Zatrzymywanie po bieżącym zestawie…"
-              : "Pauza po bieżącym zestawie"}
+              ? l(
+                  "Pausing after the current set…",
+                  "Zatrzymywanie po bieżącym zestawie…",
+                )
+              : l("Pause after the current set", "Pauza po bieżącym zestawie")}
           </button>
         )}
         {["planned", "paused", "failed", "failedRecoverable"].includes(
@@ -2773,7 +3444,9 @@ function ImportSessionProgress({
             disabled={actionPending}
             onClick={() => onControl("resume")}
           >
-            {session.status === "failed" ? "Ponów" : "Wznów"}
+            {session.status === "failed"
+              ? l("Retry", "Ponów")
+              : l("Resume", "Wznów")}
           </button>
         )}
         {session.status === "rollbackFailed" && (
@@ -2782,7 +3455,7 @@ function ImportSessionProgress({
             disabled={actionPending}
             onClick={onRetryRollback}
           >
-            Ponów wycofanie
+            {l("Retry rollback", "Ponów wycofanie")}
           </button>
         )}
         {!(["completed", "cancelled"] as string[]).includes(session.status) && (
@@ -2792,7 +3465,9 @@ function ImportSessionProgress({
             disabled={actionPending || session.cancelRequested}
             onClick={() => onControl("cancel")}
           >
-            {session.cancelRequested ? "Anulowanie…" : "Anuluj"}
+            {session.cancelRequested
+              ? l("Cancelling…", "Anulowanie…")
+              : l("Cancel", "Anuluj")}
           </button>
         )}
       </div>
@@ -2801,36 +3476,110 @@ function ImportSessionProgress({
 }
 
 function sessionStatusLabel(status: ImportSession["status"]) {
-  if (status === "planned") return "Gotowy do uruchomienia";
-  if (status === "queued") return "Import oczekuje w kolejce";
-  if (status === "running") return "Kopiowanie i weryfikacja";
-  if (status === "paused") return "Import wstrzymany";
-  if (status === "completed") return "Import zakończony";
-  if (status === "failed") return "Import zatrzymany przez błąd";
+  if (status === "planned")
+    return l("Ready to start", "Gotowy do uruchomienia");
+  if (status === "queued")
+    return l("Import is queued", "Import oczekuje w kolejce");
+  if (status === "running")
+    return l("Copying and verifying", "Kopiowanie i weryfikacja");
+  if (status === "paused") return l("Import paused", "Import wstrzymany");
+  if (status === "completed") return l("Import completed", "Import zakończony");
+  if (status === "failed")
+    return l("Import stopped by an error", "Import zatrzymany przez błąd");
   if (status === "failedRecoverable")
-    return "Karta jest niedostępna — podłącz ją i wznów";
-  if (status === "rollingBack") return "Wycofywanie plików tej sesji";
-  if (status === "rollbackFailed") return "Wycofanie wymaga ponowienia";
-  return "Import anulowany";
+    return l(
+      "Card unavailable — reconnect it and resume",
+      "Karta jest niedostępna — podłącz ją i wznów",
+    );
+  if (status === "rollingBack")
+    return l(
+      "Rolling back files from this session",
+      "Wycofywanie plików tej sesji",
+    );
+  if (status === "rollbackFailed")
+    return l("Rollback needs to be retried", "Wycofanie wymaga ponowienia");
+  return l("Import cancelled", "Import anulowany");
 }
 
 function formatDuration(seconds: number) {
   if (seconds < 60) return `${Math.max(1, Math.ceil(seconds))} s`;
   if (seconds < 3600) return `${Math.ceil(seconds / 60)} min`;
-  return `${(seconds / 3600).toFixed(1)} godz.`;
+  return `${(seconds / 3600).toFixed(1)} ${l("hr", "godz.")}`;
 }
 
 function timeSourceLabel(
   source: "exif" | "videoMetadata" | "fileModified" | "unknown",
 ) {
-  if (source === "exif") return "czas EXIF";
-  if (source === "videoMetadata") return "czas filmu";
-  if (source === "fileModified") return "czas pliku";
-  return "czas nieznany";
+  if (source === "exif") return l("EXIF time", "czas EXIF");
+  if (source === "videoMetadata") return l("video time", "czas filmu");
+  if (source === "fileModified") return l("file time", "czas pliku");
+  return l("unknown time", "czas nieznany");
 }
 
 function sourceName(source: SourceVolume): string {
   return source.name.trim() || source.mountPath;
+}
+
+function workflowMatchesSource(
+  workflow: PendingSourceWorkflow,
+  source: SourceVolume,
+) {
+  const identity = workflow.sourceIdentity;
+  return Boolean(
+    identity?.markerUuid && identity.markerUuid === source.markerUuid,
+  );
+}
+
+function sourceWorkflowId(source: SourceVolume) {
+  return source.markerUuid
+    ? `marker:${source.markerUuid}`
+    : `unverified:${source.fingerprint}`;
+}
+
+function volumeScanSource(source: SourceVolume): ScanSource {
+  return {
+    kind: "volume",
+    sourceId: sourceWorkflowId(source),
+    identity: {
+      markerUuid: source.markerUuid,
+      platformVolumeId: source.platformVolumeId,
+      fallbackFingerprint: source.fingerprint,
+    },
+    displayName: source.name.trim() || source.mountPath,
+  };
+}
+
+function directoryScanSource(path: string, displayName?: string): ScanSource {
+  return {
+    kind: "directory",
+    sourceId: `directory:${path}`,
+    displayName: displayName || displayFileName(path) || path,
+  };
+}
+
+function workflowSourceFor(root: string, source: ScanSource | null) {
+  return {
+    sourceId: source?.sourceId ?? `unverified:${root}`,
+    sourceIdentity: source?.kind === "volume" ? source.identity : null,
+    displayName: source?.displayName ?? displayFileName(root),
+  };
+}
+
+function sourceMatchesIdentity(
+  source: SourceVolume,
+  identity: SourceIdentity,
+): boolean {
+  const hasStrongIdentity =
+    identity.markerUuid !== null || identity.platformVolumeId !== null;
+  if (hasStrongIdentity) {
+    return Boolean(
+      (identity.markerUuid !== null &&
+        source.markerUuid === identity.markerUuid) ||
+      (identity.platformVolumeId !== null &&
+        source.platformVolumeId === identity.platformVolumeId),
+    );
+  }
+  return source.fingerprint === identity.fallbackFingerprint;
 }
 
 function sourceMatchesSession(source: SourceVolume, session: ImportSession) {
@@ -2885,16 +3634,20 @@ function bindingMatchesExactly(
 }
 
 function workflowStateLabel(state: PendingSourceWorkflow["state"]) {
-  if (state === "awaitingDecision") return "Czeka na decyzję";
-  if (state === "scanning") return "Skanowanie";
-  if (state === "awaitingProfileConfirmation") return "Potwierdź aparat";
-  if (state === "preparingPlan") return "Przygotowanie planu";
-  if (state === "planReady") return "Plan gotowy";
-  if (state === "importing") return "Importowanie";
-  if (state === "failedRecoverable") return "Można wznowić";
-  if (state === "ignoredUntilDisconnect") return "Pominięta do odłączenia";
-  if (state === "disconnected") return "Odłączona";
-  return "Wykryta";
+  if (state === "awaitingDecision")
+    return l("Awaiting decision", "Czeka na decyzję");
+  if (state === "scanning") return l("Scanning", "Skanowanie");
+  if (state === "awaitingProfileConfirmation")
+    return l("Confirm camera", "Potwierdź aparat");
+  if (state === "preparingPlan")
+    return l("Preparing plan", "Przygotowanie planu");
+  if (state === "planReady") return l("Plan ready", "Plan gotowy");
+  if (state === "importing") return l("Importing", "Importowanie");
+  if (state === "failedRecoverable") return l("Can resume", "Można wznowić");
+  if (state === "ignoredUntilDisconnect")
+    return l("Ignored until disconnected", "Pominięta do odłączenia");
+  if (state === "disconnected") return l("Disconnected", "Odłączona");
+  return l("Detected", "Wykryta");
 }
 
 function profileForIdentity(
@@ -2948,15 +3701,15 @@ function cameraIdentityKey(identity: CameraIdentity): string {
 }
 
 function formatTimestamp(timestamp: number): string {
-  if (timestamp === 0) return "Czas nieznany";
-  return new Intl.DateTimeFormat("pl-PL", {
+  if (timestamp === 0) return l("Unknown time", "Czas nieznany");
+  return new Intl.DateTimeFormat(activeIntlLocale(), {
     dateStyle: "medium",
     timeStyle: "short",
   }).format(new Date(timestamp));
 }
 
 function formatEventRange(startsAt: number, endsAt: number): string {
-  if (startsAt === 0 || endsAt === 0) return "Czas nieznany";
+  if (startsAt === 0 || endsAt === 0) return l("Unknown time", "Czas nieznany");
   if (startsAt === endsAt) return formatTimestamp(startsAt);
 
   const start = new Date(startsAt);
@@ -2969,10 +3722,10 @@ function formatEventRange(startsAt: number, endsAt: number): string {
     return `${formatTimestamp(startsAt)} – ${formatTimestamp(endsAt)}`;
   }
 
-  const date = new Intl.DateTimeFormat("pl-PL", {
+  const date = new Intl.DateTimeFormat(activeIntlLocale(), {
     dateStyle: "medium",
   }).format(start);
-  const time = new Intl.DateTimeFormat("pl-PL", {
+  const time = new Intl.DateTimeFormat(activeIntlLocale(), {
     timeStyle: "short",
   });
   return `${date}, ${time.format(start)}–${time.format(end)}`;
@@ -2980,9 +3733,10 @@ function formatEventRange(startsAt: number, endsAt: number): string {
 
 function defaultEventNames(events: SourceScanResponse["events"]) {
   return Object.fromEntries(
-    events.map((event) => [
-      event.index,
-      `wydarzenie-${String(event.index).padStart(2, "0")}`,
-    ]),
+    events.map((event) => [event.index, defaultEventName(event.index)]),
   );
+}
+
+function defaultEventName(index: number) {
+  return `${l("event", "wydarzenie")}-${String(index).padStart(2, "0")}`;
 }

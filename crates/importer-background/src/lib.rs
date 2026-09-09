@@ -96,6 +96,18 @@ pub fn resolve_connection(
         .map(|profile| profile.name.clone())
         .collect();
 
+    let profile_behavior = settings
+        .portable
+        .camera_profiles
+        .iter()
+        .find(|profile| binding.camera_profile_ids.contains(&profile.id))
+        .and_then(|profile| profile.source_behavior);
+    let configured_behavior = if binding.behavior != SourceBehavior::Ask {
+        binding.behavior
+    } else {
+        profile_behavior.unwrap_or(settings.portable.import.default_source_behavior)
+    };
+
     Some(SourceConnection {
         volume: volume.clone(),
         binding_id: binding.id,
@@ -107,7 +119,7 @@ pub fn resolve_connection(
         behavior: if probable_match {
             SourceBehavior::Ask
         } else {
-            binding.behavior
+            configured_behavior
         },
         probable_match,
     })
@@ -183,6 +195,7 @@ mod tests {
             name: "Aparat rodzinny".to_owned(),
             exif_matchers: Vec::new(),
             default_time_offset_seconds: 0,
+            source_behavior: None,
         });
         settings.local.source_bindings.push(SourceBinding {
             id: Uuid::new_v4(),
@@ -321,6 +334,7 @@ mod tests {
                 name: name.into(),
                 exif_matchers: Vec::new(),
                 default_time_offset_seconds: 0,
+                source_behavior: None,
             });
         }
         for (marker, profile) in [(marker_a, profile_a), (marker_b, profile_b)] {

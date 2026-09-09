@@ -123,6 +123,10 @@ impl MediaScanJob {
     pub(crate) fn imported_candidate_count(&self) -> Option<usize> {
         self.result.as_ref().map(|result| result.scan.items.len())
     }
+
+    pub(crate) fn result(&self) -> Option<&SourceScanResponse> {
+        self.result.as_ref()
+    }
 }
 
 #[tauri::command]
@@ -309,9 +313,7 @@ pub(crate) fn start_media_scan_internal(
                 }
                 Err(error) => {
                     let workflow = crate::sources::PendingSourceWorkflow {
-                        source_id: volume
-                            .marker_uuid
-                            .map_or_else(|| volume.fingerprint.clone(), |id| id.to_string()),
+                        source_id: crate::sources::source_workflow_id(&volume),
                         source_root: volume.mount_path.clone(),
                         source_identity: Some(SourceIdentity {
                             marker_uuid: volume.marker_uuid,

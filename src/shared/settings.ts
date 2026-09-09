@@ -2,7 +2,8 @@ import { invoke } from "@tauri-apps/api/core";
 import { i18n } from "../i18n/instance";
 
 export type ImportOperation = "copy" | "moveAfterVerification";
-export type SourceBehavior = "ask" | "autoPreparePlan" | "ignore";
+export type SourceBehavior =
+  "ask" | "autoPreparePlan" | "autoImport" | "ignore";
 export type ResumeAfterRestart = "ask" | "automatic";
 export type CollisionPolicy = "ask" | "appendSequence";
 export type UiLanguage = "en" | "pl";
@@ -40,6 +41,7 @@ export interface CameraProfile {
   name: string;
   exifMatchers: ExifCameraMatcher[];
   defaultTimeOffsetSeconds: number;
+  sourceBehavior?: SourceBehavior | null;
 }
 
 export interface ExifCameraMatcher {

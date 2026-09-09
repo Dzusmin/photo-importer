@@ -4,7 +4,16 @@ import userEvent from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { settingsResponseFixture } from "../../test/fixtures";
 import type { AppSettings } from "../../shared/settings";
+import { ThemeProvider } from "../../theme/ThemeProvider";
 import { SettingsPanel } from "./SettingsPanel";
+
+function renderSettingsPanel() {
+  return render(
+    <ThemeProvider>
+      <SettingsPanel />
+    </ThemeProvider>,
+  );
+}
 
 describe("SettingsPanel", () => {
   it("loads, validates, saves and can discard local edits", async () => {
@@ -18,7 +27,7 @@ describe("SettingsPanel", () => {
       }
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
     await screen.findByText("Start a new event after");
     const gap = screen.getAllByRole("spinbutton")[0];
 
@@ -48,7 +57,7 @@ describe("SettingsPanel", () => {
       if (command === "load_settings") return settingsResponseFixture();
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
     await screen.findByText(
       "No profiles. You can add the first camera manually.",
     );
@@ -69,7 +78,7 @@ describe("SettingsPanel", () => {
       if (command === "load_settings") return settingsResponseFixture();
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
 
     await user.click(
       await screen.findByLabelText(
@@ -103,7 +112,7 @@ describe("SettingsPanel", () => {
       }
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
 
     const language = await screen.findByLabelText("Language");
     await user.selectOptions(language, "pl");
@@ -127,7 +136,7 @@ describe("SettingsPanel", () => {
         return settingsResponseFixture();
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
 
     expect(await screen.findByRole("alert")).toHaveTextContent(
       "Corrupted settings",
@@ -145,7 +154,7 @@ describe("SettingsPanel", () => {
       if (command === "clear_thumbnail_cache") clear();
     });
     const user = userEvent.setup();
-    render(<SettingsPanel />);
+    renderSettingsPanel();
 
     await user.click(
       await screen.findByRole("button", { name: "Clear thumbnail cache" }),
@@ -155,5 +164,18 @@ describe("SettingsPanel", () => {
     expect(
       await screen.findByText(/thumbnail cache was cleared/),
     ).toBeInTheDocument();
+  });
+
+  it("offers every application theme", async () => {
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+    });
+    renderSettingsPanel();
+
+    const theme = await screen.findByLabelText("Theme");
+    expect(theme).toHaveDisplayValue("System setting");
+    expect(
+      [...theme.querySelectorAll("option")].map((option) => option.value),
+    ).toEqual(["system", "dark", "light", "high-contrast"]);
   });
 });

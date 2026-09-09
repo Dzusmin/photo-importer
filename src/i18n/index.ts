@@ -20,6 +20,15 @@ export async function loadStoredLanguage(): Promise<void> {
   }
 }
 
+/** Translate small, component-local UI copy that is not part of a reusable catalog. */
+export function localize(english: string, polish: string): string {
+  return i18n.resolvedLanguage === "pl" ? polish : english;
+}
+
+export function activeIntlLocale(): "en-US" | "pl-PL" {
+  return i18n.resolvedLanguage === "pl" ? "pl-PL" : "en-US";
+}
+
 export { i18n };
 export {
   DEFAULT_LOCALE,

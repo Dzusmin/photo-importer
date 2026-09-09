@@ -11,6 +11,7 @@
     "navigationLabel": "Główna nawigacja",
     "navigation": {
       "import": "Import",
+      "plans": "Plany",
       "backup": "Backup",
       "activity": "Aktywność",
       "settings": "Ustawienia"
@@ -20,6 +21,11 @@
         "eyebrow": "PRZESTRZEŃ ROBOCZA",
         "title": "Import",
         "description": "Wybierz źródło i przygotuj zdjęcia do biblioteki."
+      },
+      "plans": {
+        "eyebrow": "KOLEJKA IMPORTU",
+        "title": "Plany",
+        "description": "Przeglądaj zapisane plany importu i zarządzaj nimi."
       },
       "backup": {
         "eyebrow": "OCHRONA BIBLIOTEKI",
@@ -117,6 +123,23 @@
     "unknown": "Nie udało się zakończyć operacji."
   },
   "settings": {
+    "appearance": {
+      "title": "Wygląd",
+      "description": "Wybierz wygodny schemat kolorów. Zmiana jest stosowana natychmiast na tym komputerze.",
+      "theme": "Motyw",
+      "active": "Aktualnie używany: {{theme}}",
+      "options": {
+        "system": "Ustawienie systemowe",
+        "dark": "Ciemny",
+        "light": "Jasny",
+        "high-contrast": "Wysoki kontrast"
+      },
+      "resolved": {
+        "dark": "ciemny",
+        "light": "jasny",
+        "high-contrast": "wysoki kontrast"
+      }
+    },
     "language": {
       "label": "Język",
       "description": "Wybierz język używany przez aplikację."
@@ -174,7 +197,10 @@
     },
     "sourceBehavior": {
       "ask": "Pokaż powiadomienie i zapytaj",
+      "inherit": "Użyj ustawienia nadrzędnego",
       "autoPreparePlan": "Przygotuj plan automatycznie",
+      "autoImport": "Skanuj i rozpocznij kopiowanie automatycznie (bez potwierdzenia)",
+      "autoImportConfirmation": "Automatyczny import rozpocznie kopiowanie od razu po wykryciu zidentyfikowanej karty i przygotowaniu bezkonfliktowego planu. Włączyć tę funkcję?",
       "ignore": "Ignoruj"
     },
     "naming": {
@@ -200,6 +226,7 @@
       "model": "Model EXIF",
       "serial": "Numer seryjny EXIF",
       "timeOffset": "Domyślna korekta czasu (sekundy)",
+      "automation": "Automatyzacja dla tego aparatu",
       "unknownCamera": "Nieznany aparat"
     },
     "bindings": {
