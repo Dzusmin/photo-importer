@@ -5,7 +5,7 @@ use std::path::{Component, Path, PathBuf};
 
 use chrono::{Datelike, Local, TimeZone};
 use importer_domain::settings::CollisionPolicy;
-use importer_media::{EventGroup, MediaFileKind, MediaItem};
+use importer_media::{EventGroup, MediaFile, MediaFileKind, MediaItem};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
@@ -127,6 +127,201 @@ pub enum PlanError {
     UnbalancedFileNameTemplate,
     #[error("file name template resolves to an invalid file name")]
     UnsafeFileNameTemplate,
+    #[error("could not find an available destination file name")]
+    SequenceExhausted,
+}
+
+trait DestinationProbe {
+    fn exists(&self, path: &Path) -> bool;
+}
+
+struct FileSystemDestinationProbe;
+
+impl DestinationProbe for FileSystemDestinationProbe {
+    fn exists(&self, path: &Path) -> bool {
+        path.exists()
+    }
+}
+
+struct DestinationRegistry<P> {
+    probe: P,
+    reserved: HashSet<String>,
+}
+
+struct DestinationInspection {
+    conflicts: Vec<PlanConflict>,
+    has_internal_duplicate: bool,
+}
+
+impl<P: DestinationProbe> DestinationRegistry<P> {
+    fn new(probe: P) -> Self {
+        Self {
+            probe,
+            reserved: HashSet::new(),
+        }
+    }
+
+    fn inspect(
+        &self,
+        candidates: &[DestinationCandidate<'_>],
+        item_key: &str,
+    ) -> DestinationInspection {
+        let mut candidates_seen = HashSet::new();
+        let mut conflicts = Vec::new();
+        let mut has_internal_duplicate = false;
+
+        for candidate in candidates {
+            let destination_path = &candidate.destination_path;
+            let key = normalized_path_key(destination_path);
+            let duplicate_inside_item = !candidates_seen.insert(key.clone());
+            let kind = if self.probe.exists(destination_path) {
+                Some(PlanConflictKind::DestinationExists)
+            } else if self.reserved.contains(&key) || duplicate_inside_item {
+                Some(PlanConflictKind::DuplicateDestination)
+            } else {
+                None
+            };
+            has_internal_duplicate |= duplicate_inside_item;
+            if let Some(kind) = kind {
+                conflicts.push(PlanConflict {
+                    kind,
+                    item_key: item_key.to_owned(),
+                    destination_path: destination_path.clone(),
+                });
+            }
+        }
+
+        DestinationInspection {
+            conflicts,
+            has_internal_duplicate,
+        }
+    }
+
+    fn reserve(&mut self, candidates: &[DestinationCandidate<'_>]) {
+        self.reserved.extend(
+            candidates
+                .iter()
+                .map(|candidate| normalized_path_key(&candidate.destination_path)),
+        );
+    }
+}
+
+struct ItemNamingContext<'a> {
+    event_name: &'a str,
+    template_context: &'a TemplateContext,
+    item_counter: u64,
+}
+
+struct ItemPlanInput<'a> {
+    item: &'a MediaItem,
+    included_files: Vec<&'a MediaFile>,
+    folder: &'a Path,
+    naming: ItemNamingContext<'a>,
+}
+
+struct DestinationCandidate<'a> {
+    source: &'a MediaFile,
+    destination_relative_path: PathBuf,
+    destination_path: PathBuf,
+}
+
+struct ItemPlanResult {
+    operations: Vec<PlannedFileOperation>,
+    conflicts: Vec<PlanConflict>,
+}
+
+struct ItemPlanner<'a, P> {
+    library_root: &'a Path,
+    file_name_template: &'a str,
+    collision_policy: CollisionPolicy,
+    destinations: DestinationRegistry<P>,
+}
+
+impl<'a, P: DestinationProbe> ItemPlanner<'a, P> {
+    fn new(
+        library_root: &'a Path,
+        file_name_template: &'a str,
+        collision_policy: CollisionPolicy,
+        probe: P,
+    ) -> Self {
+        Self {
+            library_root,
+            file_name_template,
+            collision_policy,
+            destinations: DestinationRegistry::new(probe),
+        }
+    }
+
+    fn plan(&mut self, input: ItemPlanInput<'_>) -> Result<ItemPlanResult, PlanError> {
+        self.plan_from_sequence(input, 1)
+    }
+
+    fn plan_from_sequence(
+        &mut self,
+        input: ItemPlanInput<'_>,
+        initial_sequence: u32,
+    ) -> Result<ItemPlanResult, PlanError> {
+        let mut sequence = initial_sequence;
+        loop {
+            let candidates = self.build_candidates(&input, sequence)?;
+            let inspection = self.destinations.inspect(&candidates, &input.item.key);
+
+            if inspection.conflicts.is_empty()
+                || self.collision_policy == CollisionPolicy::Ask
+                || inspection.has_internal_duplicate
+            {
+                self.destinations.reserve(&candidates);
+                return Ok(ItemPlanResult {
+                    operations: candidates
+                        .into_iter()
+                        .map(|candidate| PlannedFileOperation {
+                            source_path: candidate.source.path.clone(),
+                            source_relative_path: candidate.source.relative_path.clone(),
+                            destination_path: candidate.destination_path,
+                            destination_relative_path: candidate.destination_relative_path,
+                            kind: candidate.source.kind,
+                            size_bytes: candidate.source.size_bytes,
+                        })
+                        .collect(),
+                    conflicts: inspection.conflicts,
+                });
+            }
+
+            sequence = sequence
+                .checked_add(1)
+                .ok_or(PlanError::SequenceExhausted)?;
+        }
+    }
+
+    fn build_candidates<'b>(
+        &self,
+        input: &ItemPlanInput<'b>,
+        sequence: u32,
+    ) -> Result<Vec<DestinationCandidate<'b>>, PlanError> {
+        input
+            .included_files
+            .iter()
+            .copied()
+            .map(|file| {
+                let templated_name = render_file_name_template(
+                    self.file_name_template,
+                    input.item.captured_at_unix_ms,
+                    input.naming.event_name,
+                    input.naming.template_context,
+                    &file.relative_path,
+                    input.naming.item_counter,
+                )?;
+                let file_name = sequenced_file_name(Path::new(&templated_name), sequence);
+                let destination_relative_path = input.folder.join(file_name);
+                let destination_path = self.library_root.join(&destination_relative_path);
+                Ok(DestinationCandidate {
+                    source: file,
+                    destination_relative_path,
+                    destination_path,
+                })
+            })
+            .collect()
+    }
 }
 
 pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, PlanError> {
@@ -136,7 +331,6 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
 
     let mut events = request.events;
     events.sort_by_key(|input| (input.event.starts_at_unix_ms, input.event.index));
-    let mut planned_paths = HashSet::new();
     let mut planned_events = Vec::new();
     let mut conflicts = Vec::new();
     let mut excluded_item_count = 0;
@@ -147,6 +341,12 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
         .iter()
         .map(|path| normalized_path_key(path))
         .collect();
+    let mut item_planner = ItemPlanner::new(
+        &request.library_root,
+        &request.file_name_template,
+        request.collision_policy,
+        FileSystemDestinationProbe,
+    );
 
     for input in events {
         let event_name = input.name.trim();
@@ -164,13 +364,14 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
                 excluded_item_count += 1;
                 continue;
             }
-            let skipped_files = item
+            let included_files: Vec<_> = item
                 .files
                 .iter()
-                .filter(|file| excluded_source_paths.contains(&normalized_path_key(&file.path)))
-                .count();
+                .filter(|file| !excluded_source_paths.contains(&normalized_path_key(&file.path)))
+                .collect();
+            let skipped_files = item.files.len() - included_files.len();
             excluded_file_count += skipped_files;
-            if skipped_files == item.files.len() {
+            if included_files.is_empty() {
                 excluded_item_count += 1;
                 continue;
             }
@@ -185,27 +386,29 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
                 event_name,
                 context,
             )?;
-            let (operations, item_conflicts) = plan_item(
-                &request.library_root,
-                &folder,
-                &item,
-                &request.file_name_template,
-                item_counter,
-                event_name,
-                context,
-                request.collision_policy,
-                &mut planned_paths,
-                &excluded_source_paths,
-            )?;
-            conflicts.extend(item_conflicts);
+            let item_plan = item_planner.plan(ItemPlanInput {
+                item: &item,
+                included_files,
+                folder: &folder,
+                naming: ItemNamingContext {
+                    event_name,
+                    template_context: context,
+                    item_counter,
+                },
+            })?;
+            conflicts.extend(item_plan.conflicts);
             planned_items
                 .entry(folder)
                 .or_default()
                 .push(PlannedMediaItem {
                     item_key: item.key,
                     captured_at_unix_ms: item.captured_at_unix_ms,
-                    total_size_bytes: operations.iter().map(|file| file.size_bytes).sum(),
-                    files: operations,
+                    total_size_bytes: item_plan
+                        .operations
+                        .iter()
+                        .map(|file| file.size_bytes)
+                        .sum(),
+                    files: item_plan.operations,
                     has_raw_jpeg_pair: item.has_raw_jpeg_pair,
                     has_sidecar: item.has_sidecar,
                     camera_alias: context.camera_alias.clone(),
@@ -241,6 +444,7 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
         ImportPlanStatus::RequiresDecision
     };
 
+    drop(item_planner);
     Ok(ImportPlan {
         status,
         library_root: request.library_root,
@@ -252,82 +456,6 @@ pub fn build_import_plan(request: BuildImportPlanRequest) -> Result<ImportPlan, 
         excluded_item_count,
         excluded_file_count,
     })
-}
-
-fn plan_item(
-    library_root: &Path,
-    folder: &Path,
-    item: &MediaItem,
-    file_name_template: &str,
-    item_counter: u64,
-    event_name: &str,
-    context: &TemplateContext,
-    collision_policy: CollisionPolicy,
-    planned_paths: &mut HashSet<String>,
-    excluded_source_paths: &HashSet<String>,
-) -> Result<(Vec<PlannedFileOperation>, Vec<PlanConflict>), PlanError> {
-    let mut sequence = 1_u32;
-    loop {
-        let candidates: Vec<_> = item
-            .files
-            .iter()
-            .filter(|file| !excluded_source_paths.contains(&normalized_path_key(&file.path)))
-            .map(|file| {
-                let templated_name = render_file_name_template(
-                    file_name_template,
-                    item.captured_at_unix_ms,
-                    event_name,
-                    context,
-                    &file.relative_path,
-                    item_counter,
-                )?;
-                let file_name = sequenced_file_name(Path::new(&templated_name), sequence);
-                let relative = folder.join(file_name);
-                let destination = library_root.join(&relative);
-                Ok((file, relative, destination))
-            })
-            .collect::<Result<Vec<_>, PlanError>>()?;
-        let found: Vec<_> = candidates
-            .iter()
-            .filter_map(|(_, _, destination)| {
-                let key = normalized_path_key(destination);
-                if destination.exists() {
-                    Some((PlanConflictKind::DestinationExists, destination.clone()))
-                } else if planned_paths.contains(&key) {
-                    Some((PlanConflictKind::DuplicateDestination, destination.clone()))
-                } else {
-                    None
-                }
-            })
-            .collect();
-
-        if found.is_empty() || collision_policy == CollisionPolicy::Ask {
-            for (_, _, destination) in &candidates {
-                planned_paths.insert(normalized_path_key(destination));
-            }
-            let operations = candidates
-                .into_iter()
-                .map(|(file, relative, destination)| PlannedFileOperation {
-                    source_path: file.path.clone(),
-                    source_relative_path: file.relative_path.clone(),
-                    destination_path: destination,
-                    destination_relative_path: relative,
-                    kind: file.kind,
-                    size_bytes: file.size_bytes,
-                })
-                .collect();
-            let conflicts = found
-                .into_iter()
-                .map(|(kind, destination_path)| PlanConflict {
-                    kind,
-                    item_key: item.key.clone(),
-                    destination_path,
-                })
-                .collect();
-            return Ok((operations, conflicts));
-        }
-        sequence = sequence.saturating_add(1);
-    }
 }
 
 fn render_file_name_template(
@@ -816,6 +944,85 @@ mod tests {
                 .iter()
                 .any(|conflict| conflict.kind == PlanConflictKind::DuplicateDestination)
         );
+    }
+
+    #[test]
+    fn duplicate_destinations_inside_one_media_item_are_reported() {
+        let root = tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            vec![item("a", &["FIRST.CR3", "SECOND.CR3"])],
+            CollisionPolicy::Ask,
+        );
+        request.file_name_template = "same-name".to_owned();
+
+        let plan = build_import_plan(request).unwrap();
+
+        assert_eq!(plan.status, ImportPlanStatus::RequiresDecision);
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(
+            plan.conflicts[0].kind,
+            PlanConflictKind::DuplicateDestination
+        );
+    }
+
+    #[test]
+    fn internal_duplicates_are_not_retried_with_another_sequence() {
+        let root = tempdir().unwrap();
+        let mut request = request(
+            root.path(),
+            vec![item("a", &["FIRST.CR3", "SECOND.CR3"])],
+            CollisionPolicy::AppendSequence,
+        );
+        request.file_name_template = "same-name".to_owned();
+
+        let plan = build_import_plan(request).unwrap();
+
+        assert_eq!(plan.status, ImportPlanStatus::RequiresDecision);
+        assert_eq!(plan.conflicts.len(), 1);
+        assert_eq!(
+            plan.conflicts[0].kind,
+            PlanConflictKind::DuplicateDestination
+        );
+    }
+
+    #[test]
+    fn sequence_exhaustion_returns_an_error() {
+        struct AlwaysOccupied;
+
+        impl DestinationProbe for AlwaysOccupied {
+            fn exists(&self, _path: &Path) -> bool {
+                true
+            }
+        }
+
+        let root = tempdir().unwrap();
+        let media_item = item("a", &["IMG.CR3"]);
+        let included_files = media_item.files.iter().collect();
+        let folder = PathBuf::from("event");
+        let context = TemplateContext::default();
+        let mut planner = ItemPlanner::new(
+            root.path(),
+            "{original_name}",
+            CollisionPolicy::AppendSequence,
+            AlwaysOccupied,
+        );
+
+        let result = planner.plan_from_sequence(
+            ItemPlanInput {
+                item: &media_item,
+                included_files,
+                folder: &folder,
+                naming: ItemNamingContext {
+                    event_name: "event",
+                    template_context: &context,
+                    item_counter: 1,
+                },
+            },
+            u32::MAX,
+        );
+
+        assert!(matches!(result, Err(PlanError::SequenceExhausted)));
     }
 
     #[test]
