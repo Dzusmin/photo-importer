@@ -6,6 +6,8 @@ export interface SystemStatus {
   operatingSystem: string;
   architecture: string;
   backendStatus: "ready" | "degraded" | "error";
+  importEngineStatus: "ready" | "degraded" | "error";
+  importEngineLastError: string | null;
 }
 
 export function getSystemStatus(): Promise<SystemStatus | null> {

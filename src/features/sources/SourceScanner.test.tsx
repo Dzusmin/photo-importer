@@ -23,7 +23,10 @@ import type {
   SourceScanResponse,
   SourceVolume,
 } from "../../shared/sources";
-import type { AppSettings } from "../../shared/settings";
+import {
+  importPlanSettingsRevision,
+  type AppSettings,
+} from "../../shared/settings";
 import { SourceScanner } from "./SourceScanner";
 import { setAppLanguage } from "../../i18n";
 
@@ -207,6 +210,113 @@ describe("SourceScanner", () => {
     ).toBeInTheDocument();
   });
 
+  it("shows concurrent scans separately and cancels the selected job by id", async () => {
+    const cancelledIds: string[] = [];
+    mockIPC((command, args) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (
+        command === "list_media_sources" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "list_media_scans") {
+        return [
+          scanJobFixture({ id: "scan-a", path: "E:\\" }),
+          scanJobFixture({
+            id: "scan-b",
+            path: "F:\\",
+            phase: "readingMetadata",
+          }),
+        ];
+      }
+      if (command === "cancel_media_scan") {
+        cancelledIds.push((args as { scanId: string }).scanId);
+        return scanJobFixture({ id: (args as { scanId: string }).scanId });
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+
+    const scans = await screen.findByRole("region", { name: "Aktywne skany" });
+    expect(
+      within(scans).getByRole("region", { name: "Skan E:\\" }),
+    ).toBeInTheDocument();
+    const secondScan = within(scans).getByRole("region", { name: "Skan F:\\" });
+    expect(secondScan).toBeInTheDocument();
+
+    await user.click(
+      within(secondScan).getByRole("button", { name: "Anuluj skanowanie" }),
+    );
+    expect(cancelledIds).toEqual(["scan-b"]);
+  });
+
+  it("does not let another source scan replace the manually opened scan", async () => {
+    const first = sourceFixture();
+    const second: SourceVolume = {
+      ...sourceFixture(),
+      fingerprint: "sha256:second-card",
+      name: "SECOND CAMERA",
+      mountPath: "F:\\",
+    };
+    mockIPC((command, args) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [first, second];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "ensure_media_source_marker") return "marker-a";
+      if (command === "start_media_scan") {
+        return scanJobFixture({
+          id: "scan-a",
+          path: (args as { path: string }).path,
+        });
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+
+    const firstCard = (
+      await screen.findByRole("heading", { name: "CAMERA" })
+    ).closest("article");
+    expect(firstCard).not.toBeNull();
+    await user.click(
+      within(firstCard as HTMLElement).getByRole("button", { name: "Skanuj" }),
+    );
+    expect(
+      await screen.findByRole("region", { name: "Skan E:\\" }),
+    ).toBeInTheDocument();
+
+    const unrelatedResult = scanResultFixture();
+    unrelatedResult.scan.root = "F:\\";
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        id: "scan-b",
+        path: "F:\\",
+        status: "completed",
+        phase: "completed",
+        result: unrelatedResult,
+        updatedAtUnixMs: 2,
+      }),
+    );
+
+    expect(
+      screen.getByRole("region", { name: "Skan E:\\" }),
+    ).toBeInTheDocument();
+    expect(
+      within(firstCard as HTMLElement).getByRole("button", {
+        name: "Skanowanie…",
+      }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByText("Nie znaleziono obsługiwanych zdjęć ani filmów."),
+    ).not.toBeInTheDocument();
+  });
+
   it("streams discovered photos into a live preview before completion", async () => {
     mockIPC((command) => {
       if (command === "load_settings") return settingsResponseFixture();
@@ -360,7 +470,7 @@ describe("SourceScanner", () => {
       scan: response,
       plan: importPlan(),
       settingsSchemaVersion: settings.settings.schemaVersion,
-      settingsRevision: JSON.stringify(settings.settings.portable.naming),
+      settingsRevision: importPlanSettingsRevision(settings.settings),
       editor: {
         eventNames: { 1: "wydarzenie-02" },
         excludedItemKeys: ["img"],
@@ -390,7 +500,7 @@ describe("SourceScanner", () => {
       scan: result,
       plan: null,
       settingsSchemaVersion: settings.settings.schemaVersion,
-      settingsRevision: JSON.stringify(settings.settings.portable.naming),
+      settingsRevision: importPlanSettingsRevision(settings.settings),
       editor: {
         eventNames: { 1: "wydarzenie-01" },
         excludedItemKeys: [],
@@ -707,6 +817,7 @@ describe("SourceScanner", () => {
 
   it("allows correction, planning, starting and pausing an import", async () => {
     vi.spyOn(window, "confirm").mockReturnValue(true);
+    const openHistory = vi.fn();
     const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     const response = mediaResult();
     const plan = importPlan();
@@ -764,7 +875,7 @@ describe("SourceScanner", () => {
       }
     });
     const user = userEvent.setup();
-    render(<SourceScanner />);
+    render(<SourceScanner onOpenHistory={openHistory} />);
     expect(
       screen.queryByRole("navigation", { name: "Etapy importu" }),
     ).not.toBeInTheDocument();
@@ -845,6 +956,28 @@ describe("SourceScanner", () => {
         calls.some((call) => call.command === "start_import_session"),
       ).toBe(true),
     );
+    expect(
+      calls.find((call) => call.command === "create_import_session")?.args,
+    ).toMatchObject({
+      request: {
+        sourceFingerprint: "sha256:card",
+        sourceIdentity: {
+          markerUuid: undefined,
+          platformVolumeId: null,
+          fallbackFingerprint: "sha256:card",
+        },
+      },
+    });
+    expect(
+      calls.find((call) => call.command === "start_import_session")?.args,
+    ).toEqual({ sessionId: "session-1", sourceRoot: null });
+    expect(
+      calls.findIndex((call) => call.command === "start_import_session"),
+    ).toBeLessThan(
+      calls.findIndex(
+        (call) => call.command === "delete_pending_source_workflow",
+      ),
+    );
     await emit("import-progress", importSessionFixture({ status: "running" }));
     await waitFor(() =>
       expect(screen.getByText("Import").closest("li")).toHaveAttribute(
@@ -863,16 +996,143 @@ describe("SourceScanner", () => {
       "import-progress",
       importSessionFixture({ status: "completed" }),
     );
-    await user.click(await screen.findByRole("button", { name: "Usuń plan" }));
     await waitFor(() =>
       expect(screen.queryByText("event\\IMG.JPG")).not.toBeInTheDocument(),
     );
+    expect(screen.queryByText("Import zakończony")).not.toBeInTheDocument();
+    expect(screen.getByText("Import został zakończony.")).toBeInTheDocument();
+    await user.click(
+      screen.getByRole("button", { name: "Przejdź do historii" }),
+    );
+    expect(openHistory).toHaveBeenCalledOnce();
+    await user.click(screen.getByRole("button", { name: "Zamknij" }));
+    expect(
+      screen.queryByText("Import został zakończony."),
+    ).not.toBeInTheDocument();
     expect(
       calls.filter((call) => call.command === "delete_pending_source_workflow"),
-    ).toHaveLength(2);
+    ).toHaveLength(1);
+  });
+
+  it("keeps the pending workflow when starting the import fails", async () => {
+    const source = sourceFixture();
+    const workflow = pendingPlanWorkflow(source);
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [source];
+      if (command === "list_pending_source_workflows") return [workflow];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session") {
+        throw {
+          code: "importStartFailed",
+          message: "Import was not accepted",
+        };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner openWorkflowId={workflow.sourceId} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Rozpocznij import" }),
+    );
+
     expect(
-      screen.getByText("Plan importu został usunięty."),
+      await screen.findByText("Nie udało się zakończyć operacji importu."),
     ).toBeInTheDocument();
+    expect(calls).toContain("start_import_session");
+    expect(calls).not.toContain("delete_pending_source_workflow");
+  });
+
+  it("invalidates a restored plan when a non-naming plan setting changed", async () => {
+    const source = sourceFixture();
+    const plannedSettings = settingsResponseFixture();
+    plannedSettings.settings.local.libraryPath = "C:\\Library";
+    const currentSettings = settingsResponseFixture();
+    currentSettings.settings.local.libraryPath = "D:\\Photos";
+    const workflow = pendingPlanWorkflow(source);
+    workflow.settingsRevision = importPlanSettingsRevision(
+      plannedSettings.settings,
+    );
+
+    mockIPC((command) => {
+      if (command === "load_settings") return currentSettings;
+      if (command === "list_media_sources") return [source];
+      if (command === "list_pending_source_workflows") return [workflow];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+
+    render(<SourceScanner openWorkflowId={workflow.sourceId} />);
+
+    expect(
+      await screen.findByText(
+        "Ustawienia wpływające na plan importu zmieniły się — przelicz plan ponownie.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Rozpocznij import" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Przygotuj plan" }),
+    ).toBeInTheDocument();
+  });
+
+  it("surfaces a pending workflow deletion failure after the import starts", async () => {
+    const source = sourceFixture();
+    const workflow = pendingPlanWorkflow(source);
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [source];
+      if (command === "list_pending_source_workflows") return [workflow];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session") {
+        return importSessionFixture({ status: "running" });
+      }
+      if (command === "delete_pending_source_workflow") {
+        throw {
+          code: "workflowDeleteFailed",
+          message: "Pending workflow could not be deleted",
+        };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner openWorkflowId={workflow.sourceId} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Rozpocznij import" }),
+    );
+
+    expect(
+      await screen.findByText(
+        "Nie udało się odczytać lub zaktualizować zapisanego procesu importu.",
+      ),
+    ).toBeInTheDocument();
+    expect(calls.indexOf("start_import_session")).toBeLessThan(
+      calls.indexOf("delete_pending_source_workflow"),
+    );
   });
 
   it("does not rebuild a card plan after the scanned volume disappears", async () => {
@@ -923,8 +1183,10 @@ describe("SourceScanner", () => {
     const response = mediaResult();
     response.scan.root = root;
     const saved: PendingSourceWorkflow[] = [];
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
     openDialog.mockResolvedValue(root);
     mockIPC((command, args) => {
+      calls.push({ command, args: (args ?? {}) as Record<string, unknown> });
       if (command === "load_settings") return settingsResponseFixture();
       if (command === "list_media_sources") return [];
       if (
@@ -936,6 +1198,10 @@ describe("SourceScanner", () => {
         return [];
       if (command === "start_media_scan") return scanJobFixture({ path: root });
       if (command === "build_import_plan_preview") return importPlan();
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session") {
+        return importSessionFixture({ status: "running" });
+      }
       if (command === "save_pending_source_workflow") {
         saved.push((args as { workflow: PendingSourceWorkflow }).workflow);
       }
@@ -967,6 +1233,151 @@ describe("SourceScanner", () => {
       sourceIdentity: null,
       state: "planReady",
     });
+
+    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await waitFor(() =>
+      expect(
+        calls.find((call) => call.command === "start_import_session")?.args,
+      ).toEqual({ sessionId: "session-1", sourceRoot: root }),
+    );
+    expect(
+      calls.find((call) => call.command === "create_import_session")?.args,
+    ).toMatchObject({
+      request: { sourceFingerprint: null, sourceIdentity: null },
+    });
+  });
+
+  it("does not create a card session when the prepared source is disconnected", async () => {
+    const response = mediaResult();
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "build_import_plan_preview") return importPlan();
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    const view = render(<SourceScanner appStatus="ready" />);
+
+    await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        status: "completed",
+        phase: "completed",
+        result: response,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Przygotuj plan" }),
+    );
+    await screen.findByRole("button", { name: "Rozpocznij import" });
+
+    view.rerender(<SourceScanner appStatus="connecting" />);
+    await waitFor(() =>
+      expect(
+        screen.getByRole("heading", { name: "Sprawdzam dostępne źródła…" }),
+      ).toBeInTheDocument(),
+    );
+    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+
+    expect(calls).not.toContain("create_import_session");
+    expect(
+      screen.getByText(/Zeskanowana karta jest niedostępna albo nie odpowiada/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not move an unverified plan to a colliding card at another mount", async () => {
+    const original = sourceFixture();
+    const replacement = { ...sourceFixture(), mountPath: "F:\\" };
+    const workflow = pendingPlanWorkflow(original);
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [replacement];
+      if (command === "list_pending_source_workflows") return [workflow];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner openWorkflowId={workflow.sourceId} />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Rozpocznij import" }),
+    );
+
+    expect(calls).not.toContain("create_import_session");
+    expect(
+      screen.getByText(/Zeskanowana karta jest niedostępna albo nie odpowiada/),
+    ).toBeInTheDocument();
+  });
+
+  it("does not resume an unverified session on a colliding card at another mount", async () => {
+    const replacement = { ...sourceFixture(), mountPath: "F:\\" };
+    const session = importSessionFixture({
+      status: "failedRecoverable",
+      sourceIdentity: {
+        markerUuid: null,
+        platformVolumeId: null,
+        fallbackFingerprint: replacement.fingerprint,
+      },
+      operations: [
+        {
+          id: 1,
+          ordinal: 0,
+          itemKey: "img",
+          eventName: "event",
+          sourcePath: "E:\\DCIM\\IMG.JPG",
+          sourceRelativePath: "DCIM\\IMG.JPG",
+          destinationPath: "C:\\Library\\event\\IMG.JPG",
+          destinationRelativePath: "event\\IMG.JPG",
+          kind: "jpeg",
+          sizeBytes: 10,
+          status: "failed",
+          sourceSha256: null,
+          destinationSha256: null,
+          attempts: 1,
+          lastError: "Karta odłączona",
+          sourceDeleted: false,
+        },
+      ],
+    });
+    const calls: string[] = [];
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [replacement];
+      if (command === "list_import_sessions") return [session];
+      if (
+        command === "list_media_scans" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+
+    await user.click(await screen.findByRole("button", { name: "Wznów" }));
+
+    expect(calls).not.toContain("start_import_session");
+    expect(
+      screen.getByText(/Pierwotna obserwacja karty jest niedostępna/),
+    ).toBeInTheDocument();
   });
 
   it("requires profile confirmation and automatically prepares a plan for a new card", async () => {
@@ -1034,6 +1445,92 @@ describe("SourceScanner", () => {
     expect(
       saved.mock.calls[0][0].local.sourceBindings[0].cameraProfileIds,
     ).toHaveLength(1);
+  });
+
+  it("reports partial profile approval and retries a failed card identifier write", async () => {
+    const source = sourceFixture();
+    const response = mediaResult();
+    response.scan.items[0].cameraIdentity = {
+      make: "Fujifilm",
+      model: "X-T5",
+      serialNumber: "ABC123",
+    };
+    response.scan.items[0].files[0].cameraIdentity =
+      response.scan.items[0].cameraIdentity;
+    response.events[0].items[0] = response.scan.items[0];
+    const workflow: PendingSourceWorkflow = {
+      ...pendingPlanWorkflow(source),
+      state: "awaitingProfileConfirmation",
+      scan: response,
+      plan: null,
+    };
+    let settings = settingsResponseFixture();
+    settings.settings.portable.import.defaultSourceBehavior = "autoImport";
+    const saved: AppSettings[] = [];
+    let markerAttempts = 0;
+    mockIPC((command, args) => {
+      if (command === "load_settings") return settings;
+      if (command === "list_media_sources") return [source];
+      if (command === "list_pending_source_workflows") return [workflow];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+      if (command === "ensure_media_source_marker") {
+        markerAttempts += 1;
+        if (markerAttempts === 1) throw new Error("Card is temporarily locked");
+        return "saved-marker-id";
+      }
+      if (command === "save_settings") {
+        const next = (args as { settings: AppSettings }).settings;
+        saved.push(next);
+        settings = { ...settings, settings: next };
+        return settings;
+      }
+      if (command === "acknowledge_pending_source") return undefined;
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner openWorkflowId={workflow.sourceId} />);
+
+    await user.click(
+      await screen.findByRole("button", {
+        name: "Zatwierdź profile i zapamiętaj kartę",
+      }),
+    );
+
+    expect(
+      await screen.findByText(
+        /Profile aparatów zostały zatwierdzone, ale nie udało się zapisać identyfikatora karty/,
+      ),
+    ).toBeInTheDocument();
+    expect(saved[0].local.sourceBindings[0]).toMatchObject({
+      behavior: "ask",
+      markerState: "writeFailed",
+      sourceIdentity: { markerUuid: null },
+    });
+
+    await user.click(
+      screen.getByRole("button", {
+        name: "Ponów zapis identyfikatora karty",
+      }),
+    );
+
+    expect(
+      await screen.findByText(/^Identyfikator karty został zapisany\./),
+    ).toBeInTheDocument();
+    expect(saved[1].local.sourceBindings[0]).toMatchObject({
+      behavior: "autoImport",
+      markerState: "written",
+      sourceIdentity: { markerUuid: "saved-marker-id" },
+    });
+    expect(
+      screen.queryByRole("button", {
+        name: "Ponów zapis identyfikatora karty",
+      }),
+    ).not.toBeInTheDocument();
   });
 
   it("does not create a move session when destructive confirmation is rejected", async () => {
@@ -1111,7 +1608,7 @@ describe("SourceScanner", () => {
       scan: state === "planReady" ? result : null,
       plan: state === "planReady" ? importPlan() : null,
       settingsSchemaVersion: 2,
-      settingsRevision: JSON.stringify(settings.settings.portable.naming),
+      settingsRevision: importPlanSettingsRevision(settings.settings),
       editor: {
         eventNames: state === "planReady" ? { 1: "Wakacje" } : {},
         excludedItemKeys: [],
@@ -1208,7 +1705,9 @@ describe("SourceScanner", () => {
       scan: result,
       plan: importPlan(),
       settingsSchemaVersion: 2,
-      settingsRevision: "",
+      settingsRevision: importPlanSettingsRevision(
+        settingsResponseFixture().settings,
+      ),
       editor: {
         eventNames: { 1: "Wakacje" },
         excludedItemKeys: [],
@@ -1320,7 +1819,7 @@ describe("SourceScanner", () => {
             scan: result,
             plan: null,
             settingsSchemaVersion: 2,
-            settingsRevision: JSON.stringify(settings.settings.portable.naming),
+            settingsRevision: importPlanSettingsRevision(settings.settings),
             editor: {
               eventNames: {},
               excludedItemKeys: [],
@@ -1363,6 +1862,122 @@ describe("SourceScanner", () => {
       await screen.findByRole("button", { name: "Ponów wycofanie" }),
     );
     expect(await screen.findByText("Import anulowany")).toBeInTheDocument();
+  });
+
+  it("keeps multiple import sessions visible and controls them by id", async () => {
+    const calls: Array<{ command: string; args: Record<string, unknown> }> = [];
+    const queued = importSessionFixture({
+      id: "session-a",
+      createdAtUnixMs: 1,
+      status: "queued",
+    });
+    const running = importSessionFixture({
+      id: "session-b",
+      createdAtUnixMs: 2,
+      status: "running",
+    });
+    mockIPC((command, args) => {
+      calls.push({ command, args: args as Record<string, unknown> });
+      if (command === "load_settings") return settingsResponseFixture();
+      if (
+        command === "list_media_sources" ||
+        command === "list_media_scans" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "list_import_sessions") return [queued, running];
+      if (command === "pause_import_session") {
+        return { ...running, pauseRequested: true, updatedAtUnixMs: 2 };
+      }
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+
+    const queuedPanel = await screen.findByRole("region", {
+      name: "Sesja importu session-a",
+    });
+    const runningPanel = await screen.findByRole("region", {
+      name: "Sesja importu session-b",
+    });
+    expect(
+      within(queuedPanel).getByText("Import oczekuje w kolejce"),
+    ).toBeInTheDocument();
+    expect(
+      within(runningPanel).getByText("Kopiowanie i weryfikacja"),
+    ).toBeInTheDocument();
+
+    await user.click(
+      within(runningPanel).getByRole("button", {
+        name: "Pauza po bieżącym zestawie",
+      }),
+    );
+    await waitFor(() =>
+      expect(calls).toContainEqual({
+        command: "pause_import_session",
+        args: { sessionId: "session-b" },
+      }),
+    );
+
+    await emit("import-progress", {
+      ...running,
+      status: "paused",
+      updatedAtUnixMs: 3,
+    });
+    expect(
+      within(queuedPanel).getByText("Import oczekuje w kolejce"),
+    ).toBeInTheDocument();
+    expect(
+      await within(
+        screen.getByRole("region", { name: "Sesja importu session-b" }),
+      ).findByText("Import wstrzymany"),
+    ).toBeInTheDocument();
+  });
+
+  it("focuses the exact scan or import selected in the operations center", async () => {
+    const scan = scanJobFixture({
+      id: "scan-route",
+      path: "G:\\",
+      status: "failed",
+      error: "Card could not be read",
+    });
+    const session = importSessionFixture({
+      id: "import-route",
+      status: "running",
+    });
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (
+        command === "list_media_sources" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "list_media_scans") return [scan];
+      if (command === "list_import_sessions") return [session];
+    });
+
+    const { rerender } = render(
+      <SourceScanner
+        openOperationRoute={{ kind: "scan", scanId: "scan-route" }}
+      />,
+    );
+    const scanPanel = await screen.findByRole("region", { name: "Skan G:\\" });
+    await waitFor(() => expect(scanPanel).toHaveClass("operation-focus"));
+    expect(scanPanel).toHaveFocus();
+    expect(screen.getByText("Card could not be read")).toBeInTheDocument();
+
+    rerender(
+      <SourceScanner
+        openOperationRoute={{
+          kind: "import",
+          importSessionId: "import-route",
+        }}
+      />,
+    );
+    const importPanel = await screen.findByRole("region", {
+      name: "Sesja importu import-route",
+    });
+    await waitFor(() => expect(importPanel).toHaveClass("operation-focus"));
+    expect(importPanel).toHaveFocus();
   });
 });
 
@@ -1468,5 +2083,33 @@ function importPlan(): ImportPlan {
     totalSizeBytes: 10,
     excludedItemCount: 0,
     excludedFileCount: 0,
+  };
+}
+
+function pendingPlanWorkflow(source: SourceVolume): PendingSourceWorkflow {
+  return {
+    sourceId: `unverified:${source.fingerprint}:${source.mountPath}`,
+    sourceRoot: source.mountPath,
+    sourceIdentity: {
+      markerUuid: source.markerUuid,
+      platformVolumeId: source.platformVolumeId,
+      fallbackFingerprint: source.fingerprint,
+    },
+    displayName: source.name,
+    state: "planReady",
+    scan: mediaResult(),
+    plan: importPlan(),
+    settingsSchemaVersion: 2,
+    settingsRevision: importPlanSettingsRevision(
+      settingsResponseFixture().settings,
+    ),
+    editor: {
+      eventNames: { 1: "wydarzenie-1" },
+      excludedItemKeys: [],
+      itemProfileAssignments: {},
+      expandedEventIndexes: [],
+    },
+    error: null,
+    updatedAtUnixMs: 1,
   };
 }

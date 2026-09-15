@@ -8,6 +8,7 @@ mod backups;
 mod events;
 mod imports;
 mod localization;
+mod operations;
 mod scan_jobs;
 mod settings;
 mod sources;
@@ -28,6 +29,7 @@ use imports::{
     ImportService, cancel_import_session, create_import_session, list_import_sessions,
     pause_import_session, retry_import_rollback, start_import_session,
 };
+use operations::list_operations;
 use scan_jobs::{ScanService, cancel_media_scan, list_media_scans, start_media_scan};
 
 use settings::{
@@ -53,16 +55,139 @@ struct SystemStatus {
     operating_system: &'static str,
     architecture: &'static str,
     backend_status: &'static str,
+    import_engine_status: &'static str,
+    import_engine_last_error: Option<String>,
 }
 
 #[tauri::command]
-fn get_system_status() -> SystemStatus {
+fn get_system_status(
+    settings: tauri::State<'_, SettingsService>,
+    manifest: tauri::State<'_, ImportManifest>,
+    imports: tauri::State<'_, ImportService>,
+) -> SystemStatus {
+    let library_path = settings
+        .current_settings()
+        .map(|settings| settings.local.library_path)
+        .map_err(|_| "Nie można odczytać ustawień biblioteki.".to_owned());
+    let sessions = manifest
+        .list_import_sessions()
+        .map(|sessions| {
+            sessions
+                .into_iter()
+                .filter_map(|session| {
+                    let error = session.last_error?;
+                    let severity = match session.status {
+                        importer_manifest::ImportSessionStatus::Failed
+                        | importer_manifest::ImportSessionStatus::RollbackFailed => {
+                            EngineHealthSeverity::Error
+                        }
+                        importer_manifest::ImportSessionStatus::FailedRecoverable
+                        | importer_manifest::ImportSessionStatus::Paused => {
+                            EngineHealthSeverity::Degraded
+                        }
+                        _ => return None,
+                    };
+                    Some(SessionHealthIssue {
+                        severity,
+                        updated_at_unix_ms: session.updated_at_unix_ms,
+                        error,
+                    })
+                })
+                .collect()
+        })
+        .map_err(|error| format!("Nie można odczytać manifestu importu: {error}"));
+    let runtime = imports.runtime_health().map_err(str::to_owned);
+    let engine_health = determine_import_engine_health(library_path, sessions, runtime);
+
     SystemStatus {
         product_name: importer_domain::PRODUCT_NAME,
         app_version: env!("CARGO_PKG_VERSION"),
         operating_system: std::env::consts::OS,
         architecture: std::env::consts::ARCH,
         backend_status: "ready",
+        import_engine_status: engine_health.severity.as_str(),
+        import_engine_last_error: engine_health.last_error,
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum EngineHealthSeverity {
+    Ready,
+    Degraded,
+    Error,
+}
+
+impl EngineHealthSeverity {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Ready => "ready",
+            Self::Degraded => "degraded",
+            Self::Error => "error",
+        }
+    }
+}
+
+#[derive(Debug)]
+struct EngineHealth {
+    severity: EngineHealthSeverity,
+    last_error: Option<String>,
+}
+
+#[derive(Debug)]
+struct SessionHealthIssue {
+    severity: EngineHealthSeverity,
+    updated_at_unix_ms: u64,
+    error: String,
+}
+
+fn determine_import_engine_health(
+    library_path: Result<Option<std::path::PathBuf>, String>,
+    sessions: Result<Vec<SessionHealthIssue>, String>,
+    runtime: Result<(), String>,
+) -> EngineHealth {
+    let mut issues = Vec::new();
+    match library_path {
+        Err(error) => issues.push((EngineHealthSeverity::Error, u64::MAX, error)),
+        Ok(None) => issues.push((
+            EngineHealthSeverity::Degraded,
+            u64::MAX,
+            "Biblioteka zdjęć nie jest skonfigurowana.".to_owned(),
+        )),
+        Ok(Some(path)) if !path.is_dir() => issues.push((
+            EngineHealthSeverity::Degraded,
+            u64::MAX,
+            format!(
+                "Skonfigurowana biblioteka jest niedostępna: {}",
+                path.display()
+            ),
+        )),
+        Ok(Some(_)) => {}
+    }
+    match sessions {
+        Err(error) => issues.push((EngineHealthSeverity::Error, u64::MAX, error)),
+        Ok(session_issues) => issues.extend(
+            session_issues
+                .into_iter()
+                .map(|issue| (issue.severity, issue.updated_at_unix_ms, issue.error)),
+        ),
+    }
+    if let Err(error) = runtime {
+        issues.push((EngineHealthSeverity::Error, u64::MAX, error));
+    }
+
+    let severity = issues
+        .iter()
+        .map(|(severity, _, _)| *severity)
+        .max()
+        .unwrap_or(EngineHealthSeverity::Ready);
+    let last_error = issues
+        .into_iter()
+        .filter(|(issue_severity, _, _)| *issue_severity == severity)
+        .max_by_key(|(_, updated_at, _)| *updated_at)
+        .map(|(_, _, error)| error);
+    EngineHealth {
+        severity,
+        last_error,
     }
 }
 
@@ -116,6 +241,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             get_system_status,
+            list_operations,
             load_settings,
             save_settings,
             restore_settings_backup,
@@ -181,13 +307,78 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::tempdir;
 
     #[test]
-    fn health_command_reports_ready_backend() {
-        let status = get_system_status();
+    fn import_engine_health_is_ready_when_dependencies_are_available() {
+        let library = tempdir().unwrap();
+        let health = determine_import_engine_health(
+            Ok(Some(library.path().to_path_buf())),
+            Ok(Vec::new()),
+            Ok(()),
+        );
 
-        assert_eq!(status.product_name, "Photo Importer");
-        assert_eq!(status.backend_status, "ready");
-        assert!(!status.app_version.is_empty());
+        assert_eq!(health.severity, EngineHealthSeverity::Ready);
+        assert_eq!(health.last_error, None);
+    }
+
+    #[test]
+    fn import_engine_health_is_degraded_for_an_unavailable_library() {
+        let library = tempdir().unwrap();
+        let missing = library.path().join("missing");
+        let health =
+            determine_import_engine_health(Ok(Some(missing.clone())), Ok(Vec::new()), Ok(()));
+
+        assert_eq!(health.severity, EngineHealthSeverity::Degraded);
+        assert!(
+            health
+                .last_error
+                .unwrap()
+                .contains(&missing.display().to_string())
+        );
+    }
+
+    #[test]
+    fn import_engine_health_reports_the_latest_error_at_the_highest_severity() {
+        let library = tempdir().unwrap();
+        let health = determine_import_engine_health(
+            Ok(Some(library.path().to_path_buf())),
+            Ok(vec![
+                SessionHealthIssue {
+                    severity: EngineHealthSeverity::Error,
+                    updated_at_unix_ms: 10,
+                    error: "older fatal error".to_owned(),
+                },
+                SessionHealthIssue {
+                    severity: EngineHealthSeverity::Degraded,
+                    updated_at_unix_ms: 30,
+                    error: "newer recoverable error".to_owned(),
+                },
+                SessionHealthIssue {
+                    severity: EngineHealthSeverity::Error,
+                    updated_at_unix_ms: 20,
+                    error: "latest fatal error".to_owned(),
+                },
+            ]),
+            Ok(()),
+        );
+
+        assert_eq!(health.severity, EngineHealthSeverity::Error);
+        assert_eq!(health.last_error.as_deref(), Some("latest fatal error"));
+    }
+
+    #[test]
+    fn import_engine_health_reports_manifest_or_runtime_failures_as_errors() {
+        let health = determine_import_engine_health(
+            Ok(None),
+            Err("manifest unavailable".to_owned()),
+            Err("runtime unavailable".to_owned()),
+        );
+
+        assert_eq!(health.severity, EngineHealthSeverity::Error);
+        assert!(matches!(
+            health.last_error.as_deref(),
+            Some("manifest unavailable" | "runtime unavailable")
+        ));
     }
 }

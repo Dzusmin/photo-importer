@@ -1,17 +1,29 @@
 import { useCallback, useEffect, useState } from "react";
+import { listen } from "@tauri-apps/api/event";
 import { useTranslation } from "react-i18next";
 import {
   listImportEvents,
   renameImportEvent,
+  type ImportEventAttention,
+  type ImportEventSort,
   type ImportEventSummary,
+  type ImportSession,
 } from "../../shared/sources";
 import { normalizeSettingsError } from "../../shared/settings";
 
-export function ImportHistoryPanel() {
+export function ImportHistoryPanel({
+  refreshRevision = 0,
+}: {
+  refreshRevision?: number;
+}) {
   const { i18n } = useTranslation();
   const polish = i18n.resolvedLanguage?.startsWith("pl") ?? false;
   const l = (en: string, pl: string) => (polish ? pl : en);
   const [events, setEvents] = useState<ImportEventSummary[]>([]);
+  const [sort, setSort] = useState<ImportEventSort>("latestImport");
+  const [needsAttention, setNeedsAttention] = useState<ImportEventAttention[]>(
+    [],
+  );
   const [editing, setEditing] = useState<string | null>(null);
   const [draft, setDraft] = useState("");
   const [busy, setBusy] = useState(false);
@@ -20,16 +32,37 @@ export function ImportHistoryPanel() {
   const refresh = useCallback(async () => {
     setBusy(true);
     try {
-      setEvents((await listImportEvents()) ?? []);
+      const result = await listImportEvents(sort);
+      setEvents(result.events ?? []);
+      setNeedsAttention(result.needsAttention ?? []);
       setError(null);
     } catch (cause) {
       setError(normalizeSettingsError(cause).message);
     } finally {
       setBusy(false);
     }
-  }, []);
+  }, [sort]);
 
-  useEffect(() => void refresh(), [refresh]);
+  useEffect(() => void refresh(), [refresh, refreshRevision]);
+
+  useEffect(() => {
+    let active = true;
+    const unlisten = listen<ImportSession>("import-progress", (event) => {
+      if (
+        active &&
+        (["completed", "cancelled"] as ImportSession["status"][]).includes(
+          event.payload.status,
+        )
+      ) {
+        void refresh();
+      }
+    });
+
+    return () => {
+      active = false;
+      void unlisten.then((stop) => stop());
+    };
+  }, [refresh]);
 
   async function save(event: ImportEventSummary) {
     setBusy(true);
@@ -52,19 +85,62 @@ export function ImportHistoryPanel() {
           </p>
           <h2>{l("Imported events", "Zaimportowane wydarzenia")}</h2>
         </div>
-        <button
-          type="button"
-          className="secondary"
-          disabled={busy}
-          onClick={() => void refresh()}
-        >
-          {busy ? l("Refreshing…", "Odświeżanie…") : l("Refresh", "Odśwież")}
-        </button>
+        <div className="history-panel__controls">
+          <label>
+            <span>{l("Sort by", "Sortuj według")}</span>
+            <select
+              value={sort}
+              disabled={busy}
+              onChange={(change) =>
+                setSort(change.target.value as ImportEventSort)
+              }
+            >
+              <option value="latestImport">
+                {l("Latest import", "Najnowszy import")}
+              </option>
+              <option value="eventName">
+                {l("Event name", "Nazwa wydarzenia")}
+              </option>
+            </select>
+          </label>
+          <button
+            type="button"
+            className="secondary"
+            disabled={busy}
+            onClick={() => void refresh()}
+          >
+            {busy ? l("Refreshing…", "Odświeżanie…") : l("Refresh", "Odśwież")}
+          </button>
+        </div>
       </div>
       {error && (
         <p className="import-error" role="alert">
           {error}
         </p>
+      )}
+      {needsAttention.length > 0 && (
+        <section
+          className="history-attention"
+          aria-labelledby="history-attention-heading"
+        >
+          <div>
+            <h3 id="history-attention-heading">
+              {l("Needs attention", "Wymaga uwagi")}
+            </h3>
+            <small>
+              {l(
+                "Repair or replace the event marker to restore this event to history.",
+                "Napraw lub zastąp marker wydarzenia, aby przywrócić je do historii.",
+              )}
+            </small>
+          </div>
+          {needsAttention.map((item) => (
+            <article key={item.folderPath}>
+              <p>{item.folderPath}</p>
+              <small>{item.reason}</small>
+            </article>
+          ))}
+        </section>
       )}
       {events.length === 0 ? (
         <p className="plans-empty">

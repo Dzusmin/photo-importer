@@ -314,6 +314,20 @@ impl ImportManifest {
             .collect()
     }
 
+    pub fn completed_event_file_count(
+        &self,
+        session_id: &str,
+        event_name: &str,
+    ) -> Result<usize, ManifestError> {
+        let count = self.connection()?.query_row(
+            "SELECT COUNT(*) FROM import_operations
+             WHERE session_id = ?1 AND event_name = ?2 AND status = 'completed'",
+            params![session_id, event_name],
+            |row| row.get::<_, i64>(0),
+        )?;
+        usize::try_from(count).map_err(|_| invalid("completed_event_file_count", count))
+    }
+
     pub fn next_import_operation(
         &self,
         session_id: &str,

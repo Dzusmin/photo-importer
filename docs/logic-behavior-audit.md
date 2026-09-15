@@ -253,136 +253,151 @@ Charakter dokumentu: backlog problemów. Ten przegląd nie wprowadza zmian w zac
 ### LOG-026 — historia jest sortowana po ścieżce folderu, nie po czasie importu
 
 - Priorytet: `P3`
-- Stan: `Potwierdzone`
-- Obecnie: sortowanie malejące używa `folder_path`.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: sortowanie malejące używało `folder_path`.
 - Skutek: kolejność zależy od szablonu nazwy katalogu i nie musi odpowiadać kolejności importów ani wykonania zdjęć.
 - Oczekiwane: jawny wybór sortowania; domyślnie ostatni import albo data wydarzenia.
+- Rozstrzygnięcie: Historia ma jawny wybór sortowania; domyślnie używa czasu zakończenia importu, z deterministyczną kolejnością i rekordami bez czasu na końcu.
 - Ślad: `src-tauri/src/events.rs` — `list_import_events`.
 
 ### LOG-027 — ręczne „Sprawdź teraz” nie oznacza zakończenia sprawdzania
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: komenda tylko ustawia flagę odświeżenia i natychmiast zwraca dotychczasowy status; frontend czeka stałe 500 ms.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: komenda tylko ustawiała flagę odświeżenia i natychmiast zwracała dotychczasowy status; frontend czekał stałe 500 ms.
 - Skutek: użytkownik może nadal widzieć poprzedni czas sprawdzenia i nie wie, czy skan faktycznie się zakończył.
 - Oczekiwane: przycisk pokazuje stan żądania do momentu nowej rewizji/statusu lub komenda czeka na zakończenie jednego cyklu.
+- Rozstrzygnięcie: każde ręczne żądanie otrzymuje generację, a komenda czeka na zakończenie odpowiadającego jej cyklu monitora zamiast używać stałego opóźnienia w UI.
 - Ślad: `src-tauri/src/background.rs` — `refresh_background_monitor`; `src/features/background/BackgroundMonitor.tsx`.
 
 ### LOG-028 — dwa nieoznaczone, podobne nośniki mogą zostać uznane za jedno źródło
 
 - Priorytet: `P1`
-- Stan: `Potwierdzone ograniczenie modelu`
-- Obecnie: zanim karta otrzyma marker UUID, fallback fingerprint opiera się na cechach woluminu. Identyczne karty o tej samej etykiecie, systemie plików i pojemności mogą się zderzyć.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: zanim karta otrzymała marker UUID, fallback fingerprint opierał się na cechach woluminu. Identyczne karty o tej samej etykiecie, systemie plików i pojemności mogły się zderzyć.
 - Skutek: rekord oczekującego źródła może zostać scalony z inną kartą.
 - Oczekiwane: traktować fallback wyłącznie jako słabą wskazówkę i nie przenosić na jego podstawie automatyzacji ani planu między sesjami bez potwierdzenia.
+- Rozstrzygnięcie: słaby fingerprint jest wyłącznie wskazówką w bieżącej sesji, nie dziedziczy automatyzacji ani planu i wymusza potwierdzenie; niezweryfikowane workflow rozróżnia również ścieżka montowania.
 - Ślady: `crates/importer-media/src/discovery.rs`; `src-tauri/src/background.rs`.
 
 ### LOG-029 — błędy automatycznego działania bywają tylko zapisane, bez widocznego alarmu
 
 - Priorytet: `P1`
-- Stan: `Potwierdzone`
-- Obecnie: część ścieżek monitora ignoruje błędy zapisu/emisji lub jedynie zmienia workflow na `failedRecoverable`. Użytkownik zobaczy problem dopiero po wejściu do Planów.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: część ścieżek monitora ignorowała błędy zapisu/emisji lub jedynie zmieniała workflow na `failedRecoverable`. Użytkownik widział problem dopiero po wejściu do Planów.
 - Skutek: automatyczne kopiowanie może się nie rozpocząć, a główny ekran nadal wygląda spokojnie.
 - Oczekiwane: trwały czerwony stan „wymaga uwagi” na głównej stronie i w nawigacji, z możliwością przejścia do konkretnego workflow.
+- Rozstrzygnięcie: `failedRecoverable` zasila trwałą listę wymagającą uwagi, widoczną na ekranie głównym i jako alarm w nawigacji, z przejściem do dokładnego workflow; błędy zapisu mają awaryjny alarm runtime.
 - Ślad: `src-tauri/src/background.rs` — ścieżki automatycznego skanu/importu i ignorowane wyniki `emit`/zapisu.
 
 ### LOG-030 — przywrócony plan może blokować skonfigurowany autoimport
 
 - Priorytet: `P2`
-- Stan: `Do decyzji`
-- Obecnie: po ponownym podłączeniu karty monitor przywraca zapisany workflow i kończy obsługę tego źródła, zamiast przejść do reguły `autoImport`.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: po ponownym podłączeniu karty monitor przywracał zapisany workflow i kończył obsługę tego źródła, zamiast przejść do reguły `autoImport`.
 - Skutek: karta ustawiona na automatyczne kopiowanie nie zawsze kopiuje automatycznie, jeżeli ma pozostałość poprzedniego planu.
 - Oczekiwane do ustalenia: zapisany plan ma zawsze pierwszeństwo i wymaga decyzji albo po zgodnej karcie i bez konfliktów autoimport kontynuuje ten plan.
+- Rozstrzygnięcie: wybrano pierwszeństwo `autoImport` po ponownym podłączeniu; monitor wykonuje świeży skan i przebudowuje plan, zachowując tylko nadal pasujące nazwy wydarzeń, wykluczenia i przypisania profili, po czym wymaga przejścia wszystkich bramek bezpieczeństwa.
 - Ślad: `src-tauri/src/background.rs` — obsługa znanego źródła i przywracanie workflow.
 
 ### LOG-031 — zadania backupu mogą przejmować UI innego wybranego celu
 
 - Priorytet: `P1`
-- Stan: `Potwierdzone`
-- Obecnie: backend przechowuje wiele zadań po ID, ale panel ma pojedynczy `job`. Przy inicjalizacji wybiera pierwsze aktywne/najnowsze zadanie niezależnie od wybranego celu, a każde zdarzenie `backup-progress` je nadpisuje.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: backend przechowywał wiele zadań po ID, ale panel miał pojedynczy `job`. Przy inicjalizacji wybierał pierwsze aktywne/najnowsze zadanie niezależnie od wybranego celu, a każde zdarzenie `backup-progress` je nadpisywało.
 - Skutek: postęp i przyciski sterujące mogą dotyczyć innego dysku niż ten widoczny w selektorze.
 - Oczekiwane: zadania indeksowane po celu/ID; szczegóły i sterowanie zawsze odpowiadają wybranemu targetowi.
+- Rozstrzygnięcie: panel utrzymuje kolekcje zadań wykonawczych i planistycznych, wybiera aktywne lub najnowsze deterministycznie w obrębie `targetId`, a sterowanie zawsze używa ID zadania wybranego celu.
 - Ślady: `src-tauri/src/backups.rs` — mapa zadań; `src/features/backups/BackupPanel.tsx` — `job`, inicjalizacja i listener.
 
 ### LOG-032 — odświeżanie dysków backupu może uruchamiać nakładające się zapytania
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: timer co 5 s i zdarzenie focus wywołują `refreshVolumes` bez blokady in-flight. Błędy obu wywołań są ignorowane.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: timer co 5 s i zdarzenie focus wywoływały `refreshVolumes` bez blokady in-flight. Błędy obu wywołań były ignorowane.
 - Skutek: wolniejsze rozpoznawanie może zakończyć się w odwrotnej kolejności, a lista po błędzie pozostaje stara bez ostrzeżenia.
 - Oczekiwane: współdzielony single-flight, numer rewizji i widoczny stan błędu/ostatniego udanego odświeżenia.
+- Rozstrzygnięcie: wszystkie źródła odświeżenia współdzielą single-flight i kontrolę rewizji/montowania; błąd zachowuje poprzednią listę, jest widoczny i nie usuwa czasu ostatniego sukcesu.
 - Ślad: `src/features/backups/BackupPanel.tsx` — timer i `refreshOnFocus`.
 
 ### LOG-033 — panel backupu nie pozwala usunąć zarejestrowanego celu
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: backend i warstwa TS mają `remove_backup_target`, ale panel nie udostępnia tej operacji.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: backend i warstwa TS miały `remove_backup_target`, ale panel nie udostępniał tej operacji.
 - Skutek: stary albo błędnie zarejestrowany dysk pozostaje na liście bez sposobu zarządzania nim.
 - Oczekiwane: akcja „Usuń cel” z potwierdzeniem; usuwa rejestrację, nie pliki backupu.
-- Ślady: `src-tauri/src/backups.rs`; `src/shared/backups.ts`; brak użycia w `src/features/backups/BackupPanel.tsx`.
+- Rozstrzygnięcie: panel oferuje potwierdzane usunięcie dokładnego celu bez kasowania plików; UI i backend blokują operację dla aktywnego planowania lub backupu, a po sukcesie wybór przechodzi deterministycznie na kolejny cel.
+- Ślady: `src-tauri/src/backups.rs`; `src/shared/backups.ts`; `src/features/backups/BackupPanel.tsx`.
 
 ### LOG-034 — rozpoczęcie backupu usuwa z ekranu poprzedni audyt i historię
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: efekt audytu czyści `snapshot` i `history`, kiedy `busy` jest prawdziwe.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: efekt audytu czyścił `snapshot` i `history`, kiedy `busy` było prawdziwe.
 - Skutek: podczas długiej kopii znika kontekst, na podstawie którego użytkownik ją zatwierdził.
 - Oczekiwane: zachować ostatni snapshot jako oznaczony „sprzed uruchomienia”; bieżący postęp pokazać obok.
+- Rozstrzygnięcie: audyt i historia są cache'owane per cel, jego ścieżkę i bibliotekę; podczas zadania pozostają widoczne jako dane sprzed uruchomienia, a odświeżenie terminalne zastępuje je dopiero po sukcesie.
 - Ślad: `src/features/backups/BackupPanel.tsx` — efekt zależny od `busy`.
 
 ### LOG-035 — panel obiecuje przyszłe przywracanie, którego UI jeszcze nie oferuje
 
 - Priorytet: `P3`
-- Stan: `Potwierdzone`
-- Obecnie: opis mówi o starszych wersjach dostępnych do przyszłego restore, ale w aplikacji nie ma przepływu przywracania.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: opis mówił o starszych wersjach dostępnych do przyszłego restore, ale w aplikacji nie było przepływu przywracania.
 - Skutek: użytkownik może oczekiwać gotowej funkcji odzyskiwania.
 - Oczekiwane: oznaczyć funkcję jako planowaną albo dostarczyć kontrolowany przepływ restore.
+- Rozstrzygnięcie: opis po polsku i angielsku nazywa starsze wersje zarchiwizowanymi kopiami ochronnymi oraz jednoznacznie oznacza przywracanie jako planowane i niedostępne w tej wersji.
 - Ślad: `src/features/backups/BackupPanel.tsx` — opis poprzednich wersji.
 
 ### LOG-036 — status „Import engine: Ready” jest deklarowany na stałe
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: widok diagnostyczny prezentuje gotowość silnika importu jako stały tekst, niezależnie od kolejki, błędów manifestu czy niedostępnej biblioteki.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: widok diagnostyczny prezentował gotowość silnika importu jako stały tekst, niezależnie od kolejki, błędów manifestu czy niedostępnej biblioteki.
 - Skutek: diagnostyka może przeczyć faktycznemu stanowi aplikacji.
 - Oczekiwane: status wyliczany z realnego health checku i ostatniego błędu podsystemu.
+- Rozstrzygnięcie: backend wylicza stan `ready`/`degraded`/`error` z konfiguracji biblioteki, manifestu, sesji i runtime importu oraz zwraca ostatni istotny błąd wyświetlany przez widok diagnostyczny.
 - Ślad: `src/App.tsx` — `ActivityView`.
 
 ### LOG-037 — startowa synchronizacja historii połyka wszystkie błędy
 
 - Priorytet: `P2`
-- Stan: `Potwierdzone`
-- Obecnie: aplikacja wywołuje `listImportEvents().catch(() => undefined)` przy starcie, aby wykryć zewnętrzne zmiany nazw.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: aplikacja wywoływała `listImportEvents().catch(() => undefined)` przy starcie, aby wykryć zewnętrzne zmiany nazw.
 - Skutek: błąd dostępu do biblioteki albo niespójność historii jest niewidoczna i nie wpływa na status systemu.
 - Oczekiwane: zapis diagnostyczny i widoczny stan wymagający uwagi, bez blokowania startu aplikacji.
+- Rozstrzygnięcie: startowa synchronizacja nadal nie blokuje uruchomienia, lecz błąd obniża stan systemu, pokazuje trwały komunikat wymagający uwagi z diagnostyką i oferuje ponowienie.
 - Ślad: `src/App.tsx` — startowy efekt `listImportEvents`.
 
 ### LOG-038 — poszczególne zakładki inaczej zachowują stan po powrocie
 
 - Priorytet: `P3`
-- Stan: `Potwierdzone / do ujednolicenia`
-- Obecnie: ekran główny pozostaje zamontowany, a Plany, Backup, Historia i Ustawienia są odmontowywane i ponownie pobierają dane lub tracą draft.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: ekran główny pozostawał zamontowany, a Plany, Backup, Historia i Ustawienia były odmontowywane i ponownie pobierały dane lub traciły draft.
 - Skutek: użytkownik nie może przewidzieć, czy po powrocie zobaczy poprzedni kontekst, ekran ładowania czy pusty formularz.
 - Oczekiwane: jawna polityka per widok: trwały stan dla aktywnych operacji, ostrzeżenie dla draftów, cache z rewizją dla danych tylko do odczytu.
+- Rozstrzygnięcie: widoki po pierwszym otwarciu pozostają zamontowane, aktywne operacje zachowują stan, dane tylko do odczytu używają cache'u odświeżanego rewizją, a opuszczenie brudnych Ustawień wymaga jawnego potwierdzenia odrzucenia draftu.
 - Ślad: `src/App.tsx` — warunkowe renderowanie widoków.
 
 ### LOG-039 — brak jednego miejsca pokazującego wszystkie aktywne operacje
 
 - Priorytet: `P2`
-- Stan: `Do decyzji`, problem architektoniczny potwierdzony przez modele wielozadaniowe
-- Obecnie: skany, importy i backupy mają osobne, pojedyncze stany UI, mimo że backend dopuszcza wiele operacji.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: skany, importy i backupy miały osobne, pojedyncze stany UI, mimo że backend dopuszczał wiele operacji.
 - Skutek: trudne jest ustalenie, co faktycznie działa w tle i która operacja wymaga uwagi.
 - Oczekiwane: wspólny model zadań lub przynajmniej licznik/centrum aktywności w nawigacji, z przejściem do konkretnego zadania.
+- Rozstrzygnięcie: wybrano wariant 1 — autorytatywny backendowy rejestr agreguje skany, importy, planowanie backupu i backupy; centrum Aktywności oraz licznik w nawigacji pokazują wspólny stan i kierują do dokładnej operacji.
 - Ślady: `SourceScanner`, `BackupPanel`, backendowe serwisy zadań.
 
 ### LOG-040 — dokumentacja opisuje starsze zachowanie niż aplikacja
 
 - Priorytet: `P3`
-- Stan: `Potwierdzone`
-- Obecnie: dokument planu automatycznego importu nadal zakłada każdorazową akceptację, mimo że istnieje `autoImport`; README wspomina użycie PowerShell do wykrywania źródeł, chociaż ta ścieżka została usunięta.
+- Stan: `Naprawione 2026-09-15`
+- W momencie audytu: dokument planu automatycznego importu nadal zakładał każdorazową akceptację, mimo że istniał `autoImport`; README wspominał użycie PowerShell do wykrywania źródeł, chociaż ta ścieżka została usunięta.
 - Skutek: kolejne decyzje i testy mogą być oparte na nieaktualnym kontrakcie.
 - Oczekiwane: po ustabilizowaniu reguł zaktualizować dokumentację i oznaczyć obowiązujące źródło prawdy.
+- Rozstrzygnięcie: README opisuje bieżące zachowanie operacyjne, a dokument planu ma jawny status dokumentu historyczno-projektowego. Wykonywalnym źródłem prawdy pozostają aktualna implementacja i pokrywające ją testy.
 - Ślady: `docs/automatic-card-import-plan.md`, `README.md`, obecny kod monitora i discovery.
 
 ## Kolejność proponowanych napraw

@@ -3,6 +3,7 @@
   "common": {
     "retry": "Try again",
     "choose": "Choose",
+    "cancel": "Cancel",
     "clear": "Clear",
     "remove": "Remove",
     "ready": "Ready"
@@ -45,6 +46,12 @@
     },
     "systemStatus": "System status",
     "reconnect": "Reconnect",
+    "unsavedSettingsConfirmation": "You have unsaved settings changes. Leave Settings and discard them?",
+    "historySyncError": {
+      "title": "Import history needs attention",
+      "impact": "The latest history changes could not be synchronized. Import and the rest of the application remain available.",
+      "action": "Check access to the photo library, then try synchronizing again."
+    },
     "diagnostics": {
       "eyebrow": "TECHNICAL INFORMATION",
       "title": "System",
@@ -53,7 +60,12 @@
       "product": "Product",
       "version": "Version",
       "system": "System",
-      "importEngine": "Import engine"
+      "importEngine": "Import engine",
+      "importEngineStatus": {
+        "ready": "Ready",
+        "degraded": "Degraded",
+        "error": "Error"
+      }
     }
   },
   "status": {
@@ -111,6 +123,7 @@
     "notFound": "The requested operation no longer exists.",
     "settingsUnavailable": "Application settings are unavailable.",
     "backupFailed": "The backup operation could not be completed.",
+    "backupTargetBusy": "This destination cannot be removed while planning or backup is active for it.",
     "invalidTargetPath": "The selected backup drive is unavailable.",
     "invalidSourcePath": "The library folder is unavailable. Check it in settings.",
     "overlappingBackupRoots": "The library and backup destination cannot be located inside each other.",
@@ -183,7 +196,17 @@
       "description": "Local photo location on this computer.",
       "path": "Main library folder",
       "placeholder": "No folder selected",
-      "dialogTitle": "Choose the main library folder"
+      "dialogTitle": "Choose the main library folder",
+      "changeEyebrow": "LIBRARY CHANGE",
+      "changeTitle": "What does this change mean?",
+      "changeImpact": "The history and backups will use the selected folder. Every saved import plan will be marked for recalculation before it can be used.",
+      "previousPath": "Current library",
+      "nextPath": "Selected folder",
+      "useNew": "Use a new library",
+      "useNewDescription": "Start using this folder as a separate library. Photo Importer will not copy files from the current library.",
+      "useMoved": "Use a moved library",
+      "useMovedDescription": "The existing library has already been moved to this folder. Photo Importer will not move files itself.",
+      "confirmClear": "Clear the library path? History and backups will be unavailable, and saved import plans will have to be recalculated after choosing a library again."
     },
     "import": {
       "title": "Import",
@@ -257,6 +280,9 @@
       "exportDialog": "Export Photo Importer settings",
       "importDialog": "Import Photo Importer settings",
       "saveFirst": "Save changes first",
+      "confirmDraftDiscard": "You have an unsaved settings draft. If this operation succeeds, the draft will be discarded. Continue?",
+      "confirmImport": "Import will replace the import defaults, naming rules, and camera profiles. The local library path, media associations, and application behavior will remain unchanged. Import and save these settings?",
+      "confirmRestore": "Restoring the backup will replace all current settings: the library path, import defaults, naming rules, camera profiles, media associations, and application behavior. Restore the previous version?",
       "export": "Export JSON",
       "import": "Import JSON",
       "restorePrevious": "Restore previous version"

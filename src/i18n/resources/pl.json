@@ -3,6 +3,7 @@
   "common": {
     "retry": "Spróbuj ponownie",
     "choose": "Wybierz",
+    "cancel": "Anuluj",
     "clear": "Wyczyść",
     "remove": "Usuń",
     "ready": "Gotowy"
@@ -45,6 +46,12 @@
     },
     "systemStatus": "Stan systemu",
     "reconnect": "Połącz ponownie",
+    "unsavedSettingsConfirmation": "Masz niezapisane zmiany ustawień. Opuścić Ustawienia i je porzucić?",
+    "historySyncError": {
+      "title": "Historia importu wymaga uwagi",
+      "impact": "Nie udało się zsynchronizować najnowszych zmian historii. Import i pozostałe funkcje aplikacji są nadal dostępne.",
+      "action": "Sprawdź dostęp do biblioteki zdjęć, a następnie ponów synchronizację."
+    },
     "diagnostics": {
       "eyebrow": "INFORMACJE TECHNICZNE",
       "title": "System",
@@ -53,7 +60,12 @@
       "product": "Produkt",
       "version": "Wersja",
       "system": "System",
-      "importEngine": "Silnik importu"
+      "importEngine": "Silnik importu",
+      "importEngineStatus": {
+        "ready": "Gotowy",
+        "degraded": "Ograniczony",
+        "error": "Błąd"
+      }
     }
   },
   "status": {
@@ -111,6 +123,7 @@
     "notFound": "Żądana operacja już nie istnieje.",
     "settingsUnavailable": "Ustawienia aplikacji są niedostępne.",
     "backupFailed": "Nie udało się zakończyć operacji backupu.",
+    "backupTargetBusy": "Nie można usunąć tego celu, gdy trwa dla niego planowanie lub backup.",
     "invalidTargetPath": "Wybrany dysk backupu nie jest dostępny.",
     "invalidSourcePath": "Katalog biblioteki nie jest dostępny. Sprawdź go w ustawieniach.",
     "overlappingBackupRoots": "Biblioteka i cel backupu nie mogą znajdować się wewnątrz siebie.",
@@ -183,7 +196,17 @@
       "description": "Lokalne położenie zdjęć na tym komputerze.",
       "path": "Główny katalog biblioteki",
       "placeholder": "Nie wybrano katalogu",
-      "dialogTitle": "Wybierz główny katalog biblioteki"
+      "dialogTitle": "Wybierz główny katalog biblioteki",
+      "changeEyebrow": "ZMIANA BIBLIOTEKI",
+      "changeTitle": "Co oznacza ta zmiana?",
+      "changeImpact": "Historia i backupy będą korzystać z wybranego katalogu. Każdy zapisany plan importu zostanie oznaczony do ponownego przeliczenia, zanim będzie można go użyć.",
+      "previousPath": "Bieżąca biblioteka",
+      "nextPath": "Wybrany katalog",
+      "useNew": "Użyj nowej biblioteki",
+      "useNewDescription": "Zacznij używać tego katalogu jako osobnej biblioteki. Photo Importer nie skopiuje plików z bieżącej biblioteki.",
+      "useMoved": "Użyj przeniesionej biblioteki",
+      "useMovedDescription": "Istniejąca biblioteka została już przeniesiona do tego katalogu. Photo Importer nie przenosi plików samodzielnie.",
+      "confirmClear": "Wyczyścić ścieżkę biblioteki? Historia i backupy będą niedostępne, a zapisane plany importu trzeba będzie przeliczyć po ponownym wybraniu biblioteki."
     },
     "import": {
       "title": "Import",
@@ -257,6 +280,9 @@
       "exportDialog": "Eksportuj ustawienia Photo Importer",
       "importDialog": "Importuj ustawienia Photo Importer",
       "saveFirst": "Najpierw zapisz zmiany",
+      "confirmDraftDiscard": "Masz niezapisany draft ustawień. Jeśli operacja się powiedzie, draft zostanie odrzucony. Kontynuować?",
+      "confirmImport": "Import zastąpi domyślne ustawienia importu, reguły nazewnictwa i profile aparatów. Lokalna ścieżka biblioteki, powiązania nośników i zachowanie aplikacji pozostaną bez zmian. Zaimportować i zapisać te ustawienia?",
+      "confirmRestore": "Przywrócenie kopii zastąpi wszystkie bieżące ustawienia: ścieżkę biblioteki, ustawienia importu, reguły nazewnictwa, profile aparatów, powiązania nośników i zachowanie aplikacji. Przywrócić poprzednią wersję?",
       "export": "Eksportuj JSON",
       "import": "Importuj JSON",
       "restorePrevious": "Przywróć poprzednią wersję"

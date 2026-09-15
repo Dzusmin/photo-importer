@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import {
@@ -14,6 +14,7 @@ import {
   pauseBackupJob,
   recognizeBackupTarget,
   registerBackupTarget,
+  removeBackupTarget,
   resumeBackupJob,
   startBackupJob,
   startBackupPlanningJob,
@@ -29,6 +30,10 @@ import {
 import { loadSettings } from "../../shared/settings";
 import { listMediaSources, type SourceVolume } from "../../shared/sources";
 import { activeIntlLocale, localize as l } from "../../i18n";
+import {
+  operationRouteKey,
+  type OperationRoute,
+} from "../../shared/operations";
 
 function phaseLabel(phase: BackupPhase): string {
   return {
@@ -40,103 +45,166 @@ function phaseLabel(phase: BackupPhase): string {
   }[phase];
 }
 
-export function BackupPanel() {
+type VolumeRefreshResult = {
+  discovered: SourceVolume[];
+  connected: BackupTarget[];
+};
+
+type BackupAuditContext = {
+  key: string;
+  targetId: string;
+  snapshot: BackupSnapshot | null;
+  history: BackupRun[];
+  checkedAtUnixMs: number;
+  stale: boolean;
+};
+
+type BackupOperationRoute = Extract<
+  OperationRoute,
+  { kind: "backup" | "backupPlanning" }
+>;
+
+export function BackupPanel({
+  openOperationRoute = null,
+  onClearOperationRoute,
+}: {
+  openOperationRoute?: BackupOperationRoute | null;
+  onClearOperationRoute?: () => void;
+} = {}) {
   const [targets, setTargets] = useState<BackupTarget[]>([]);
   const [volumes, setVolumes] = useState<SourceVolume[]>([]);
   const [selectedTargetId, setSelectedTargetId] = useState("");
-  const [libraryPath, setLibraryPath] = useState<string | null>(null);
-  const [plan, setPlan] = useState<BackupPlan | null>(null);
-  const [job, setJob] = useState<BackupJob | null>(null);
-  const [planningJob, setPlanningJob] = useState<BackupPlanningJob | null>(
+  const [routedOperationKey, setRoutedOperationKey] = useState<string | null>(
     null,
   );
+  const [libraryPath, setLibraryPath] = useState<string | null>(null);
+  const [jobs, setJobs] = useState<BackupJob[]>([]);
+  const [planningJobs, setPlanningJobs] = useState<BackupPlanningJob[]>([]);
+  const [consumedPlanningJobIds, setConsumedPlanningJobIds] = useState<
+    Set<string>
+  >(new Set());
   const [loading, setLoading] = useState(true);
   const [controlling, setControlling] = useState(false);
   const [registering, setRegistering] = useState(false);
+  const [removingTargetId, setRemovingTargetId] = useState<string | null>(null);
   const [registrationOpen, setRegistrationOpen] = useState(false);
   const [newTargetPath, setNewTargetPath] = useState("");
   const [newTargetLabel, setNewTargetLabel] = useState("");
   const [error, setError] = useState<string | null>(null);
-  const [snapshot, setSnapshot] = useState<BackupSnapshot | null>(null);
-  const [history, setHistory] = useState<BackupRun[]>([]);
+  const [auditContexts, setAuditContexts] = useState<
+    Record<string, BackupAuditContext>
+  >({});
   const [auditing, setAuditing] = useState(false);
   const [auditRevision, setAuditRevision] = useState(0);
+  const [volumeRefreshError, setVolumeRefreshError] = useState<string | null>(
+    null,
+  );
+  const [lastVolumeRefreshAt, setLastVolumeRefreshAt] = useState<number | null>(
+    null,
+  );
+  const mountedRef = useRef(false);
+  const volumeRefreshRevisionRef = useRef(0);
+  const volumeRefreshInFlightRef = useRef<Promise<VolumeRefreshResult> | null>(
+    null,
+  );
+  const openOperationRouteRef = useRef(openOperationRoute);
+  const focusedOperationRouteRef = useRef<string | null>(null);
+  openOperationRouteRef.current = openOperationRoute;
 
-  const refreshVolumes = useCallback(async () => {
-    const discovered = await listMediaSources();
-    setVolumes(discovered);
-    const recognized = await Promise.all(
-      discovered.map((volume) =>
-        recognizeBackupTarget(volume.mountPath).catch(() => null),
-      ),
-    );
-    const connected = recognized.filter(
-      (target): target is BackupTarget => target !== null,
-    );
-    if (connected.length > 0) {
-      setTargets((known) =>
-        known.map(
-          (target) =>
-            connected.find((candidate) => candidate.id === target.id) ?? target,
-        ),
-      );
-    }
+  const refreshVolumes = useCallback((): Promise<VolumeRefreshResult> => {
+    const existing = volumeRefreshInFlightRef.current;
+    if (existing) return existing;
+
+    const revision = ++volumeRefreshRevisionRef.current;
+    const refresh = (async () => {
+      try {
+        const discovered = await listMediaSources();
+        const recognized = await Promise.all(
+          discovered.map((volume) => recognizeBackupTarget(volume.mountPath)),
+        );
+        const connected = recognized.filter(
+          (target): target is BackupTarget => target !== null,
+        );
+        if (
+          mountedRef.current &&
+          revision === volumeRefreshRevisionRef.current
+        ) {
+          setVolumes(discovered);
+          setTargets((known) =>
+            known.map(
+              (target) =>
+                connected.find((candidate) => candidate.id === target.id) ??
+                target,
+            ),
+          );
+          setVolumeRefreshError(null);
+          setLastVolumeRefreshAt(Date.now());
+        }
+        return { discovered, connected };
+      } catch (reason) {
+        if (
+          mountedRef.current &&
+          revision === volumeRefreshRevisionRef.current
+        ) {
+          setVolumeRefreshError(normalizeBackupError(reason).message);
+        }
+        throw reason;
+      }
+    })();
+    volumeRefreshInFlightRef.current = refresh;
+    const clearInFlight = () => {
+      if (volumeRefreshInFlightRef.current === refresh) {
+        volumeRefreshInFlightRef.current = null;
+      }
+    };
+    void refresh.then(clearInFlight, clearInFlight);
+    return refresh;
+  }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      volumeRefreshRevisionRef.current += 1;
+    };
   }, []);
 
   useEffect(() => {
     let disposed = false;
+    const volumeRefresh = refreshVolumes().catch(() => null);
     void Promise.all([
-      listBackupTargets(),
-      listBackupJobs(),
-      listBackupPlanningJobs(),
-      loadSettings(),
-      listMediaSources(),
+      Promise.all([
+        listBackupTargets(),
+        listBackupJobs(),
+        listBackupPlanningJobs(),
+        loadSettings(),
+      ]),
+      volumeRefresh,
     ])
-      .then(
-        async ([knownTargets, jobs, planningJobs, settings, discovered]) => {
-          const recognized = await Promise.all(
-            discovered.map((volume) =>
-              recognizeBackupTarget(volume.mountPath).catch(() => null),
-            ),
-          );
-          if (disposed) return;
-          const refreshedTargets = knownTargets.map(
-            (target) =>
-              recognized.find((candidate) => candidate?.id === target.id) ??
-              target,
-          );
-          const firstConnected = refreshedTargets.find((target) =>
-            discovered.some((volume) =>
-              samePath(volume.mountPath, target.lastKnownRoot),
-            ),
-          );
-          setTargets(refreshedTargets);
-          setVolumes(discovered);
-          const activePlanningJob = planningJobs.find(
-            (item) => item.status === "running",
-          );
-          const restoredTargetId =
-            activePlanningJob?.targetId ??
-            firstConnected?.id ??
-            refreshedTargets[0]?.id ??
-            "";
-          setSelectedTargetId(restoredTargetId);
-          setLibraryPath(settings.settings.local.libraryPath);
-          setJob(
-            jobs.find((item) => ["running", "paused"].includes(item.status)) ??
-              jobs[0] ??
-              null,
-          );
-          const restoredPlanningJob =
-            activePlanningJob ??
-            planningJobs.find((item) => item.targetId === restoredTargetId) ??
-            null;
-          setPlanningJob((current) =>
-            selectLatestPlanningJob(current, restoredPlanningJob),
-          );
-          if (restoredPlanningJob?.plan) setPlan(restoredPlanningJob.plan);
-        },
-      )
+      .then(([[knownTargets, jobs, planningJobs, settings], refreshResult]) => {
+        if (disposed) return;
+        const discovered = refreshResult?.discovered ?? [];
+        const connected = refreshResult?.connected ?? [];
+        const refreshedTargets = knownTargets.map(
+          (target) =>
+            connected.find((candidate) => candidate.id === target.id) ?? target,
+        );
+        const firstConnected = refreshedTargets.find((target) =>
+          discovered.some((volume) =>
+            samePath(volume.mountPath, target.lastKnownRoot),
+          ),
+        );
+        setTargets(refreshedTargets);
+        setVolumes(discovered);
+        const restoredTargetId =
+          firstConnected?.id ?? refreshedTargets[0]?.id ?? "";
+        setSelectedTargetId(
+          openOperationRouteRef.current?.targetId ?? restoredTargetId,
+        );
+        setLibraryPath(settings.settings.local.libraryPath);
+        setJobs(jobs);
+        setPlanningJobs(planningJobs);
+      })
       .catch((reason) => {
         if (!disposed) setError(normalizeBackupError(reason).message);
       })
@@ -146,7 +214,7 @@ export function BackupPanel() {
     return () => {
       disposed = true;
     };
-  }, []);
+  }, [refreshVolumes]);
 
   useEffect(() => {
     const timer = window.setInterval(
@@ -165,7 +233,21 @@ export function BackupPanel() {
     let disposed = false;
     const unlisten = listen<BackupJob>("backup-progress", (event) => {
       if (!disposed) {
-        setJob(event.payload);
+        setJobs((current) => upsertJob(current, event.payload));
+        if (["running", "paused"].includes(event.payload.status)) {
+          setAuditContexts((current) => {
+            let changed = false;
+            const next = Object.fromEntries(
+              Object.entries(current).map(([key, context]) => {
+                if (context.targetId !== event.payload.targetId)
+                  return [key, context];
+                changed = true;
+                return [key, { ...context, stale: true }];
+              }),
+            );
+            return changed ? next : current;
+          });
+        }
         if (
           ["completed", "failed", "cancelled"].includes(event.payload.status)
         ) {
@@ -185,14 +267,7 @@ export function BackupPanel() {
       "backup-planning-progress",
       (event) => {
         if (disposed) return;
-        setPlanningJob((current) =>
-          selectLatestPlanningJob(current, event.payload),
-        );
-        if (event.payload.status === "completed") {
-          setPlan(event.payload.plan);
-        } else if (event.payload.status === "failed" && event.payload.error) {
-          setError(event.payload.error);
-        }
+        setPlanningJobs((current) => upsertJob(current, event.payload));
       },
     );
     return () => {
@@ -204,6 +279,31 @@ export function BackupPanel() {
   const selectedTarget = targets.find(
     (target) => target.id === selectedTargetId,
   );
+  const routedBackupJob =
+    routedOperationKey && openOperationRoute?.kind === "backup"
+      ? jobs.find(
+          (candidate) =>
+            candidate.id === openOperationRoute.jobId &&
+            candidate.targetId === openOperationRoute.targetId,
+        )
+      : undefined;
+  const routedPlanningJob =
+    routedOperationKey && openOperationRoute?.kind === "backupPlanning"
+      ? planningJobs.find(
+          (candidate) =>
+            candidate.id === openOperationRoute.jobId &&
+            candidate.targetId === openOperationRoute.targetId,
+        )
+      : undefined;
+  const job = routedBackupJob ?? selectJobForTarget(jobs, selectedTargetId);
+  const planningJob =
+    routedPlanningJob ??
+    selectPlanningJobForTarget(planningJobs, selectedTargetId);
+  const plan =
+    planningJob?.status === "completed" &&
+    !consumedPlanningJobIds.has(planningJob.id)
+      ? planningJob.plan
+      : null;
   const selectedVolume = selectedTarget
     ? volumes.find((volume) =>
         samePath(volume.mountPath, selectedTarget.lastKnownRoot),
@@ -219,13 +319,41 @@ export function BackupPanel() {
   );
   const auditTargetId = selectedTarget?.id;
   const auditTargetPath = selectedVolume?.mountPath;
+  const auditKey =
+    auditTargetId && auditTargetPath && libraryPath
+      ? JSON.stringify([auditTargetId, auditTargetPath, libraryPath])
+      : null;
+  const visibleAudit = auditKey ? (auditContexts[auditKey] ?? null) : null;
 
   useEffect(() => {
-    if (!auditTargetId || !auditTargetPath || !libraryPath || busy) {
-      setSnapshot(null);
-      setHistory([]);
+    if (!openOperationRoute) {
+      setRoutedOperationKey(null);
       return;
     }
+    setSelectedTargetId(openOperationRoute.targetId);
+    setRoutedOperationKey(operationRouteKey(openOperationRoute));
+  }, [openOperationRoute]);
+
+  useEffect(() => {
+    if (!routedOperationKey) {
+      focusedOperationRouteRef.current = null;
+      return;
+    }
+    if (focusedOperationRouteRef.current === routedOperationKey) return;
+    const element = document.getElementById(
+      operationElementId(routedOperationKey),
+    );
+    if (!element) return;
+    focusedOperationRouteRef.current = routedOperationKey;
+    element.focus({ preventScroll: true });
+    if (typeof element.scrollIntoView === "function") {
+      element.scrollIntoView({ block: "center" });
+    }
+  }, [jobs, planningJobs, routedOperationKey]);
+
+  useEffect(() => {
+    if (!auditKey || !auditTargetId || !auditTargetPath || !libraryPath || busy)
+      return;
     let disposed = false;
     setAuditing(true);
     void Promise.all([
@@ -234,8 +362,17 @@ export function BackupPanel() {
     ])
       .then(([nextSnapshot, runs]) => {
         if (!disposed) {
-          setSnapshot(nextSnapshot ?? null);
-          setHistory(Array.isArray(runs) ? runs : []);
+          setAuditContexts((current) => ({
+            ...current,
+            [auditKey]: {
+              key: auditKey,
+              targetId: auditTargetId,
+              snapshot: nextSnapshot ?? null,
+              history: Array.isArray(runs) ? runs : [],
+              checkedAtUnixMs: Date.now(),
+              stale: false,
+            },
+          }));
         }
       })
       .catch((reason) => {
@@ -247,7 +384,14 @@ export function BackupPanel() {
     return () => {
       disposed = true;
     };
-  }, [auditRevision, auditTargetId, auditTargetPath, busy, libraryPath]);
+  }, [
+    auditKey,
+    auditRevision,
+    auditTargetId,
+    auditTargetPath,
+    busy,
+    libraryPath,
+  ]);
 
   async function openBackup() {
     if (!selectedTarget || !selectedVolume) return;
@@ -278,8 +422,7 @@ export function BackupPanel() {
         ...current.filter((item) => item.id !== target.id),
       ]);
       setSelectedTargetId(target.id);
-      setVolumes(await listMediaSources());
-      setPlan(null);
+      await refreshVolumes();
       setRegistrationOpen(false);
       setNewTargetPath("");
       setNewTargetLabel("");
@@ -290,10 +433,56 @@ export function BackupPanel() {
     }
   }
 
+  async function removeTarget(target: BackupTarget) {
+    const targetHasActiveJob = jobs.some(
+      (candidate) =>
+        candidate.targetId === target.id &&
+        (candidate.status === "running" || candidate.status === "paused"),
+    );
+    const targetHasActivePlanningJob = planningJobs.some(
+      (candidate) =>
+        candidate.targetId === target.id && candidate.status === "running",
+    );
+    if (targetHasActiveJob || targetHasActivePlanningJob) return;
+
+    const confirmed = window.confirm(
+      l(
+        `Remove “${target.label}” from registered backup destinations? Only its registration and configuration will be removed. Backup files will remain on the drive.`,
+        `Usunąć „${target.label}” z zarejestrowanych celów backupu? Usunięta zostanie tylko rejestracja i konfiguracja celu. Pliki backupu pozostaną na dysku.`,
+      ),
+    );
+    if (!confirmed) return;
+
+    setRemovingTargetId(target.id);
+    setError(null);
+    try {
+      await removeBackupTarget(target.id);
+      setTargets((current) => {
+        const removedIndex = current.findIndex((item) => item.id === target.id);
+        const remaining = current.filter((item) => item.id !== target.id);
+        setSelectedTargetId((selected) => {
+          if (selected !== target.id) return selected;
+          return (
+            remaining[Math.min(removedIndex, remaining.length - 1)]?.id ?? ""
+          );
+        });
+        return remaining;
+      });
+      setJobs((current) =>
+        current.filter((candidate) => candidate.targetId !== target.id),
+      );
+      setPlanningJobs((current) =>
+        current.filter((candidate) => candidate.targetId !== target.id),
+      );
+    } catch (reason) {
+      setError(normalizeBackupError(reason).message);
+    } finally {
+      setRemovingTargetId(null);
+    }
+  }
+
   async function preparePlan() {
     if (!selectedTarget || !selectedVolume || !libraryPath) return;
-    setPlan(null);
-    setPlanningJob(null);
     setError(null);
     try {
       const started = await startBackupPlanningJob(
@@ -301,8 +490,7 @@ export function BackupPanel() {
         selectedVolume.mountPath,
         libraryPath,
       );
-      setPlanningJob((current) => selectLatestPlanningJob(current, started));
-      if (started.status === "completed") setPlan(started.plan);
+      setPlanningJobs((current) => upsertJob(current, started));
     } catch (reason) {
       setError(normalizeBackupError(reason).message);
     }
@@ -313,7 +501,7 @@ export function BackupPanel() {
     setError(null);
     try {
       const updated = await cancelBackupPlanningJob(planningJob.id);
-      setPlanningJob((current) => selectLatestPlanningJob(current, updated));
+      setPlanningJobs((current) => upsertJob(current, updated));
     } catch (reason) {
       setError(normalizeBackupError(reason).message);
     }
@@ -330,8 +518,20 @@ export function BackupPanel() {
       return;
     setError(null);
     try {
-      setJob(await startBackupJob(plan, selectedVolume.mountPath));
-      setPlan(null);
+      const started = await startBackupJob(plan, selectedVolume.mountPath);
+      setJobs((current) => upsertJob(current, started));
+      setAuditContexts((current) => {
+        if (!auditKey || !current[auditKey]) return current;
+        return {
+          ...current,
+          [auditKey]: { ...current[auditKey], stale: true },
+        };
+      });
+      if (planningJob) {
+        setConsumedPlanningJobIds((current) =>
+          new Set(current).add(planningJob.id),
+        );
+      }
     } catch (reason) {
       setError(normalizeBackupError(reason).message);
     }
@@ -348,7 +548,7 @@ export function BackupPanel() {
           : action === "resume"
             ? await resumeBackupJob(job.id)
             : await cancelBackupJob(job.id);
-      setJob(updated);
+      setJobs((current) => upsertJob(current, updated));
     } catch (reason) {
       setError(normalizeBackupError(reason).message);
     } finally {
@@ -405,14 +605,47 @@ export function BackupPanel() {
               )}
             </p>
           </div>
-          <button
-            type="button"
-            className="secondary"
-            disabled={busy}
-            onClick={() => setRegistrationOpen((value) => !value)}
-          >
-            {l("Register a new drive", "Zarejestruj nowy dysk")}
-          </button>
+          <div className="button-row">
+            <button
+              type="button"
+              className="danger-quiet"
+              disabled={!selectedTarget || busy || removingTargetId !== null}
+              onClick={() => {
+                if (selectedTarget) void removeTarget(selectedTarget);
+              }}
+            >
+              {removingTargetId === selectedTarget?.id
+                ? l("Removing…", "Usuwanie…")
+                : l("Remove destination", "Usuń cel")}
+            </button>
+            <button
+              type="button"
+              className="secondary"
+              disabled={busy || removingTargetId !== null}
+              onClick={() => setRegistrationOpen((value) => !value)}
+            >
+              {l("Register a new drive", "Zarejestruj nowy dysk")}
+            </button>
+          </div>
+        </div>
+
+        <div className="backup-refresh-status" aria-live="polite">
+          {lastVolumeRefreshAt !== null && (
+            <p>
+              {l(
+                `Drives last refreshed successfully: ${formatDate(lastVolumeRefreshAt)}`,
+                `Dyski ostatnio odświeżono pomyślnie: ${formatDate(lastVolumeRefreshAt)}`,
+              )}
+            </p>
+          )}
+          {volumeRefreshError && (
+            <div className="notice notice--error" role="alert">
+              {l(
+                `Couldn't refresh connected drives. Showing results from the last successful refresh. ${volumeRefreshError}`,
+                `Nie udało się odświeżyć podłączonych dysków. Pokazujemy wynik ostatniego udanego odświeżenia. ${volumeRefreshError}`,
+              )}
+            </div>
+          )}
         </div>
 
         {registrationOpen && (
@@ -478,11 +711,10 @@ export function BackupPanel() {
                   name="backup-target"
                   value={target.id}
                   checked={selectedTargetId === target.id}
-                  disabled={busy}
                   onChange={() => {
+                    setRoutedOperationKey(null);
+                    onClearOperationRoute?.();
                     setSelectedTargetId(target.id);
-                    setPlan(null);
-                    setPlanningJob(null);
                   }}
                 />
                 <span
@@ -516,8 +748,10 @@ export function BackupPanel() {
 
       {selectedTarget && (
         <BackupOverview
-          snapshot={snapshot}
-          history={history}
+          snapshot={visibleAudit?.snapshot ?? null}
+          history={visibleAudit?.history ?? []}
+          checkedAtUnixMs={visibleAudit?.checkedAtUnixMs ?? null}
+          stale={visibleAudit?.stale ?? false}
           connected={Boolean(selectedVolume)}
           auditing={auditing}
           onRefresh={() => setAuditRevision((value) => value + 1)}
@@ -564,7 +798,11 @@ export function BackupPanel() {
       )}
 
       {planningJob && planningJob.status !== "completed" && (
-        <BackupPlanningProgress job={planningJob} onCancel={cancelPlanning} />
+        <BackupPlanningProgress
+          job={planningJob}
+          focused={routedOperationKey === `backupPlanning:${planningJob.id}`}
+          onCancel={cancelPlanning}
+        />
       )}
 
       {plan && selectedVolume && (
@@ -578,6 +816,7 @@ export function BackupPanel() {
       {job && (
         <BackupProgress
           job={job}
+          focused={routedOperationKey === `backup:${job.id}`}
           controlling={controlling}
           onControl={control}
         />
@@ -600,6 +839,8 @@ function backupStatusLabel(status: BackupFileStatus): string {
 function BackupOverview({
   snapshot,
   history,
+  checkedAtUnixMs,
+  stale,
   connected,
   auditing,
   onRefresh,
@@ -607,6 +848,8 @@ function BackupOverview({
 }: {
   snapshot: BackupSnapshot | null;
   history: BackupRun[];
+  checkedAtUnixMs: number | null;
+  stale: boolean;
   connected: boolean;
   auditing: boolean;
   onRefresh: () => void;
@@ -665,6 +908,16 @@ function BackupOverview({
           </button>
         </div>
       </div>
+      {stale && checkedAtUnixMs !== null && (
+        <p className="backup-audit-stale" role="status">
+          <strong>{l("Before this run", "Dane sprzed uruchomienia")}</strong>
+          {" · "}
+          {l(
+            `last checked ${formatDate(checkedAtUnixMs)}. The snapshot and run history remain visible for reference and will be refreshed when the backup finishes.`,
+            `ostatnio sprawdzone ${formatDate(checkedAtUnixMs)}. Snapshot i historia uruchomień pozostają widoczne jako punkt odniesienia i zostaną odświeżone po zakończeniu backupu.`,
+          )}
+        </p>
+      )}
       {orphanCount > 0 && (
         <div className="backup-orphan-warning" role="alert">
           <strong>
@@ -752,8 +1005,8 @@ function BackupOverview({
                     <div>
                       <strong>
                         {l(
-                          "Previous versions (available for future restore)",
-                          "Poprzednie wersje (gotowe pod przyszłe przywracanie)",
+                          "Previous versions — archived protection copies (restore planned; unavailable in this version)",
+                          "Poprzednie wersje — zarchiwizowane kopie ochronne (przywracanie planowane; niedostępne w tej wersji)",
                         )}
                       </strong>
                       <ul>
@@ -940,9 +1193,11 @@ function BackupPlanPreview({
 
 function BackupPlanningProgress({
   job,
+  focused,
   onCancel,
 }: {
   job: BackupPlanningJob;
+  focused: boolean;
   onCancel: () => Promise<void>;
 }) {
   const indeterminate = job.totalBytes === null;
@@ -966,7 +1221,9 @@ function BackupPlanningProgress({
 
   return (
     <div
-      className={`backup-progress backup-progress--${job.status}`}
+      id={operationElementId(`backupPlanning:${job.id}`)}
+      className={`backup-progress backup-progress--${job.status}${focused ? " operation-focus" : ""}`}
+      tabIndex={-1}
       aria-live="polite"
     >
       <div className="backup-progress__heading">
@@ -1036,10 +1293,12 @@ function BackupPlanningProgress({
 
 function BackupProgress({
   job,
+  focused,
   controlling,
   onControl,
 }: {
   job: BackupJob;
+  focused: boolean;
   controlling: boolean;
   onControl: (action: "pause" | "resume" | "cancel") => Promise<void>;
 }) {
@@ -1071,7 +1330,9 @@ function BackupProgress({
 
   return (
     <div
-      className={`backup-progress backup-progress--${job.status}`}
+      id={operationElementId(`backup:${job.id}`)}
+      className={`backup-progress backup-progress--${job.status}${focused ? " operation-focus" : ""}`}
+      tabIndex={-1}
       aria-live="polite"
     >
       <div className="backup-progress__heading">
@@ -1193,18 +1454,70 @@ function samePath(left: string, right: string): boolean {
   return normalize(left) === normalize(right);
 }
 
-function selectLatestPlanningJob(
-  current: BackupPlanningJob | null,
-  incoming: BackupPlanningJob | null,
-): BackupPlanningJob | null {
-  if (!incoming) return current;
-  if (!current || current.id !== incoming.id) return incoming;
-  if (current.status !== "running" && incoming.status === "running") {
-    return current;
+function operationElementId(key: string) {
+  return `operation-${encodeURIComponent(key)}`;
+}
+
+function upsertJob<
+  T extends { id: string; status: string; updatedAtUnixMs: number },
+>(jobs: T[], incoming: T): T[] {
+  const index = jobs.findIndex((job) => job.id === incoming.id);
+  if (index < 0) return [...jobs, incoming];
+  const current = jobs[index];
+  if (
+    current.updatedAtUnixMs > incoming.updatedAtUnixMs ||
+    (current.updatedAtUnixMs === incoming.updatedAtUnixMs &&
+      isTerminalStatus(current.status) &&
+      !isTerminalStatus(incoming.status))
+  ) {
+    return jobs;
   }
-  return current.updatedAtUnixMs > incoming.updatedAtUnixMs
-    ? current
-    : incoming;
+  const next = [...jobs];
+  next[index] = incoming;
+  return next;
+}
+
+function selectJobForTarget(
+  jobs: BackupJob[],
+  targetId: string,
+): BackupJob | null {
+  return selectTargetJob(jobs, targetId, (job) =>
+    ["running", "paused"].includes(job.status),
+  );
+}
+
+function selectPlanningJobForTarget(
+  jobs: BackupPlanningJob[],
+  targetId: string,
+): BackupPlanningJob | null {
+  return selectTargetJob(jobs, targetId, (job) => job.status === "running");
+}
+
+function selectTargetJob<
+  T extends {
+    id: string;
+    targetId: string;
+    startedAtUnixMs: number;
+    updatedAtUnixMs: number;
+  },
+>(jobs: T[], targetId: string, isActive: (job: T) => boolean): T | null {
+  return (
+    jobs
+      .filter((job) => job.targetId === targetId)
+      .sort((left, right) => {
+        const activeOrder = Number(isActive(right)) - Number(isActive(left));
+        if (activeOrder !== 0) return activeOrder;
+        const startedOrder = right.startedAtUnixMs - left.startedAtUnixMs;
+        if (startedOrder !== 0) return startedOrder;
+        const updatedOrder = right.updatedAtUnixMs - left.updatedAtUnixMs;
+        if (updatedOrder !== 0) return updatedOrder;
+        return right.id.localeCompare(left.id);
+      })[0] ?? null
+  );
+}
+
+function isTerminalStatus(status: string): boolean {
+  return ["completed", "failed", "cancelled"].includes(status);
 }
 
 function formatBytes(bytes: number): string {

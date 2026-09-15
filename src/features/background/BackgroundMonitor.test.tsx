@@ -69,27 +69,35 @@ describe("BackgroundMonitor", () => {
     expect(screen.getByText("Skan nieudany")).toBeInTheDocument();
   });
 
-  it("requests an immediate refresh and temporarily disables the button", async () => {
-    vi.useFakeTimers({ shouldAdvanceTime: true });
+  it("keeps the button disabled until the requested monitoring cycle finishes", async () => {
     const calls: string[] = [];
+    let finishRefresh:
+      | ((status: ReturnType<typeof backgroundStatusFixture>) => void)
+      | undefined;
     mockIPC((command) => {
       calls.push(command);
       if (command === "get_background_status") return backgroundStatusFixture();
       if (command === "refresh_background_monitor") {
-        return backgroundStatusFixture({ connectedKnownSourceCount: 2 });
+        return new Promise((resolve) => {
+          finishRefresh = resolve;
+        });
       }
     });
-    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    const user = userEvent.setup();
     render(<BackgroundMonitor />);
     const button = await screen.findByRole("button", { name: "Sprawdź teraz" });
 
     await user.click(button);
 
     expect(calls).toContain("refresh_background_monitor");
-    expect(screen.getByText(/2 znanych nośników/)).toBeInTheDocument();
     expect(button).toBeDisabled();
-    await vi.advanceTimersByTimeAsync(500);
+    expect(button).toHaveTextContent("Sprawdzanie…");
+
+    finishRefresh?.(backgroundStatusFixture({ connectedKnownSourceCount: 2 }));
+
+    expect(await screen.findByText(/2 znanych nośników/)).toBeInTheDocument();
     await waitFor(() => expect(button).toBeEnabled());
+    expect(button).toHaveTextContent("Sprawdź teraz");
   });
 
   it("keeps an awaiting card visible until the user scans or ignores it", async () => {
@@ -123,5 +131,33 @@ describe("BackgroundMonitor", () => {
       screen.getByRole("button", { name: "Skanuj i przygotuj plan" }),
     );
     expect(acknowledged).toHaveBeenCalledOnce();
+  });
+
+  it("shows a durable automatic-workflow alarm and opens the affected workflow", async () => {
+    const onOpenWorkflow = vi.fn();
+    mockIPC((command) => {
+      if (command === "get_background_status") {
+        return backgroundStatusFixture({
+          attentionRequired: [
+            {
+              sourceId: "marker:card-29",
+              sourcePath: "E:\\",
+              displayName: "Fujifilm X-T5",
+              detail: "Nie udało się rozpocząć automatycznego importu.",
+            },
+          ],
+        });
+      }
+    });
+    const user = userEvent.setup();
+    render(
+      <BackgroundMonitor mode="compact" onOpenWorkflow={onOpenWorkflow} />,
+    );
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("Wymaga uwagi");
+    expect(screen.getByRole("alert")).toHaveTextContent("Fujifilm X-T5");
+    await user.click(screen.getByRole("button", { name: "Otwórz workflow" }));
+
+    expect(onOpenWorkflow).toHaveBeenCalledWith("marker:card-29");
   });
 });

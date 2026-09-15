@@ -85,6 +85,44 @@ export function saveSettings(settings: AppSettings): Promise<SettingsResponse> {
   return invoke<SettingsResponse>("save_settings", { settings });
 }
 
+/**
+ * Stable fingerprint of settings that can change an import plan or the import
+ * session created from it. Keep this tuple in sync with
+ * `sources::import_plan_settings_revision` in the Tauri backend.
+ */
+export function importPlanSettingsRevision(settings: AppSettings): string {
+  return JSON.stringify([
+    "import-plan-v1",
+    settings.local.libraryPath,
+    settings.portable.import.defaultOperation,
+    settings.portable.import.eventGapMinutes,
+    [
+      settings.portable.naming.folderTemplate,
+      settings.portable.naming.fileNameTemplate,
+      settings.portable.naming.collisionPolicy,
+    ],
+    settings.portable.cameraProfiles.map((profile) => [
+      profile.id,
+      profile.name,
+      profile.exifMatchers.map((matcher) => [
+        matcher.make,
+        matcher.model,
+        matcher.serialNumber,
+      ]),
+      profile.defaultTimeOffsetSeconds,
+    ]),
+    settings.local.sourceBindings.map((binding) => [
+      [
+        binding.sourceIdentity.markerUuid,
+        binding.sourceIdentity.platformVolumeId,
+        binding.sourceIdentity.fallbackFingerprint,
+      ],
+      binding.displayName,
+      binding.cameraProfileIds,
+    ]),
+  ]);
+}
+
 export function restoreSettingsBackup(): Promise<SettingsResponse> {
   return invoke<SettingsResponse>("restore_settings_backup");
 }

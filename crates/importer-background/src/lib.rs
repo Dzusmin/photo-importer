@@ -139,11 +139,10 @@ fn identity_match(
         return Some((2, false));
     }
     if identity.fallback_fingerprint == volume.fingerprint {
-        // A fallback-only legacy binding is the best identity it can have. If
-        // stronger signals were recorded and no longer match, confirmation is
-        // required before automation is allowed.
-        let probable = identity.marker_uuid.is_some() || identity.platform_volume_id.is_some();
-        return Some((u8::from(!probable), probable));
+        // Volume characteristics can collide for two distinct, unmarked cards.
+        // They are useful for suggesting a binding during this observation, but
+        // never establish the persistent identity required for automation.
+        return Some((1, true));
     }
     None
 }
@@ -246,12 +245,18 @@ mod tests {
 
     #[test]
     fn profile_behavior_is_used_for_a_bound_source() {
-        let settings = settings("card", SourceBehavior::Ignore);
+        let mut settings = settings("card", SourceBehavior::Ignore);
+        settings.local.source_bindings[0]
+            .source_identity
+            .platform_volume_id = Some("volume-1".to_owned());
+        let mut card = volume("card", "E:/");
+        card.platform_volume_id = Some("volume-1".to_owned());
 
-        let connection = resolve_connection(&volume("card", "E:/"), &settings).unwrap();
+        let connection = resolve_connection(&card, &settings).unwrap();
 
         assert_eq!(connection.profile_name, "Aparat rodzinny");
         assert_eq!(connection.behavior, SourceBehavior::Ignore);
+        assert!(!connection.probable_match);
     }
 
     #[test]
@@ -271,6 +276,29 @@ mod tests {
         assert!(
             matches!(&changes[1], MonitorChange::Connected(connection) if connection.volume.mount_path.as_path() == std::path::Path::new("F:/"))
         );
+    }
+
+    #[test]
+    fn colliding_unmarked_volumes_do_not_inherit_automatic_behavior() {
+        let settings = settings("same-card-layout", SourceBehavior::AutoImport);
+        let mut snapshot = SourceSnapshot::default();
+
+        let changes = snapshot.update(
+            vec![
+                volume("same-card-layout", "E:/"),
+                volume("same-card-layout", "F:/"),
+            ],
+            &settings,
+        );
+
+        assert_eq!(changes.len(), 2);
+        for change in changes {
+            let MonitorChange::Connected(connection) = change else {
+                panic!("a weak fallback should only suggest the existing binding");
+            };
+            assert!(connection.probable_match);
+            assert_eq!(connection.behavior, SourceBehavior::Ask);
+        }
     }
 
     #[test]

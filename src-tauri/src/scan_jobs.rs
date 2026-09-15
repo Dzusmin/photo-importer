@@ -17,8 +17,9 @@ use uuid::Uuid;
 
 use crate::settings::SettingsService;
 use crate::sources::{
-    SourceScanResponse, SourceWorkflowState, aggregate_import_matches, persist_workflow,
-    prepare_automatic_workflow,
+    SourceScanResponse, SourceWorkflowState, aggregate_import_matches,
+    import_plan_settings_revision, load_workflow_editor_snapshot, persist_workflow,
+    prepare_automatic_workflow, source_workflow_id,
 };
 
 #[derive(Debug, Default)]
@@ -54,21 +55,21 @@ pub(crate) enum MediaScanJobPhase {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct MediaScanJob {
-    id: String,
-    path: PathBuf,
-    status: MediaScanJobStatus,
+    pub(crate) id: String,
+    pub(crate) path: PathBuf,
+    pub(crate) status: MediaScanJobStatus,
     phase: MediaScanJobPhase,
     discovered_file_count: usize,
-    processed_file_count: usize,
-    total_supported_file_count: Option<usize>,
+    pub(crate) processed_file_count: usize,
+    pub(crate) total_supported_file_count: Option<usize>,
     current_path: Option<PathBuf>,
     history_bytes_read: u64,
     history_cache_hit_count: usize,
     fully_hashed_file_count: usize,
     timings: ScanJobTimings,
     started_at_unix_ms: u64,
-    updated_at_unix_ms: u64,
-    error: Option<String>,
+    pub(crate) updated_at_unix_ms: u64,
+    pub(crate) error: Option<String>,
     result: Option<SourceScanResponse>,
 }
 
@@ -108,6 +109,23 @@ impl ScanService {
 
     pub(crate) fn get(&self, id: &str) -> Option<MediaScanJob> {
         self.jobs.lock().ok()?.get(id).map(|job| job.public.clone())
+    }
+
+    pub(crate) fn list(&self) -> Result<Vec<MediaScanJob>, ScanJobCommandError> {
+        let mut jobs: Vec<_> = self
+            .jobs
+            .lock()
+            .map_err(|_| {
+                ScanJobCommandError::new(
+                    "scanStateUnavailable",
+                    "Stan skanowania jest niedostępny.",
+                )
+            })?
+            .values()
+            .map(|job| job.public.clone())
+            .collect();
+        jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at_unix_ms));
+        Ok(jobs)
     }
 }
 
@@ -151,6 +169,16 @@ pub(crate) fn start_media_scan_internal(
         ScanJobCommandError::new("settingsUnavailable", error.message().to_owned())
     })?;
     let event_gap_minutes = settings_snapshot.portable.import.event_gap_minutes;
+    let initial_volume = SystemSourceDiscovery
+        .discover()
+        .into_iter()
+        .find(|volume| volume.mount_path == path);
+    let previous_editor = initial_volume
+        .as_ref()
+        .map(|volume| load_workflow_editor_snapshot(manifest, &source_workflow_id(volume)))
+        .transpose()
+        .map_err(|error| ScanJobCommandError::new(error.code, error.message))?
+        .flatten();
     let mut jobs = service.jobs.lock().map_err(|_| {
         ScanJobCommandError::new("scanStateUnavailable", "Stan skanowania jest niedostępny.")
     })?;
@@ -189,22 +217,19 @@ pub(crate) fn start_media_scan_internal(
         },
     );
     drop(jobs);
+    crate::operations::emit_scan_operation(&app, &public);
 
-    let source_identity = SystemSourceDiscovery
-        .discover()
-        .into_iter()
-        .find(|volume| volume.mount_path == path)
-        .map_or_else(
-            || {
-                format!(
-                    "path:{}",
-                    path.canonicalize()
-                        .unwrap_or_else(|_| path.clone())
-                        .display()
-                )
-            },
-            |volume| volume.fingerprint,
-        );
+    let source_identity = initial_volume.as_ref().map_or_else(
+        || {
+            format!(
+                "path:{}",
+                path.canonicalize()
+                    .unwrap_or_else(|_| path.clone())
+                    .display()
+            )
+        },
+        |volume| volume.fingerprint.clone(),
+    );
 
     let scan_service = ScanService {
         jobs: Arc::clone(&service.jobs),
@@ -276,26 +301,20 @@ pub(crate) fn start_media_scan_internal(
             event_gap_minutes,
             import_matches,
         };
-        if let Some(job) = scan_service.update(&id, |job| {
-            job.status = MediaScanJobStatus::Completed;
-            job.phase = MediaScanJobPhase::Completed;
-            job.result = Some(response.clone());
-            job.current_path = None;
-            job.timings = ScanJobTimings {
-                discovery_ms: scan_timings.discovery_ms,
-                metadata_ms: scan_timings.metadata_ms,
-                comparing_history_ms,
-                grouping_events_ms,
-            };
-        }) {
-            let _ = app.emit("scan-progress", job);
-        }
         if let Some(volume) = SystemSourceDiscovery
             .discover()
             .into_iter()
             .find(|volume| volume.mount_path == path)
         {
-            match prepare_automatic_workflow(&settings_snapshot, &volume, response.clone()) {
+            let previous_editor = previous_editor
+                .as_ref()
+                .filter(|previous| previous.source_id == source_workflow_id(&volume));
+            match prepare_automatic_workflow(
+                &settings_snapshot,
+                &volume,
+                response.clone(),
+                previous_editor,
+            ) {
                 Ok(workflow) => {
                     if let Err(error) = persist_workflow(&scan_manifest, &workflow) {
                         finish_message(&scan_service, &app, &id, error.message);
@@ -312,6 +331,23 @@ pub(crate) fn start_media_scan_internal(
                     }
                 }
                 Err(error) => {
+                    if previous_editor.is_some() {
+                        if let Err(save_error) = scan_manifest.update_source_workflow_connection(
+                            &source_workflow_id(&volume),
+                            &volume.mount_path,
+                            "failedRecoverable",
+                            Some(&error.message),
+                            now_unix_ms(),
+                        ) {
+                            finish_message(&scan_service, &app, &id, save_error.to_string());
+                            return;
+                        }
+                        let _ =
+                            app.emit("source-workflows-invalidated", source_workflow_id(&volume));
+                        crate::background::announce_workflow_error(&app, &error.message);
+                        finish_message(&scan_service, &app, &id, error.message);
+                        return;
+                    }
                     let workflow = crate::sources::PendingSourceWorkflow {
                         source_id: crate::sources::source_workflow_id(&volume),
                         source_root: volume.mount_path.clone(),
@@ -325,19 +361,36 @@ pub(crate) fn start_media_scan_internal(
                         scan: Some(response.clone()),
                         plan: None,
                         settings_schema_version: settings_snapshot.schema_version,
-                        settings_revision: serde_json::to_string(
-                            &settings_snapshot.portable.naming,
-                        )
-                        .unwrap_or_default(),
+                        settings_revision: import_plan_settings_revision(&settings_snapshot),
                         editor: crate::sources::WorkflowEditorState::default(),
                         error: Some(error.message.clone()),
                         updated_at_unix_ms: now_unix_ms(),
                     };
-                    let _ = persist_workflow(&scan_manifest, &workflow);
+                    if let Err(save_error) = persist_workflow(&scan_manifest, &workflow) {
+                        finish_message(&scan_service, &app, &id, save_error.message);
+                        return;
+                    }
                     let _ = app.emit("source-workflow-changed", workflow);
                     crate::background::announce_workflow_error(&app, &error.message);
+                    finish_message(&scan_service, &app, &id, error.message);
+                    return;
                 }
             }
+        }
+        if let Some(job) = scan_service.update(&id, |job| {
+            job.status = MediaScanJobStatus::Completed;
+            job.phase = MediaScanJobPhase::Completed;
+            job.result = Some(response);
+            job.current_path = None;
+            job.timings = ScanJobTimings {
+                discovery_ms: scan_timings.discovery_ms,
+                metadata_ms: scan_timings.metadata_ms,
+                comparing_history_ms,
+                grouping_events_ms,
+            };
+        }) {
+            crate::operations::emit_scan_operation(&app, &job);
+            let _ = app.emit("scan-progress", job);
         }
     });
     Ok(public)
@@ -347,17 +400,7 @@ pub(crate) fn start_media_scan_internal(
 pub(crate) fn list_media_scans(
     service: tauri::State<'_, ScanService>,
 ) -> Result<Vec<MediaScanJob>, ScanJobCommandError> {
-    let mut jobs: Vec<_> = service
-        .jobs
-        .lock()
-        .map_err(|_| {
-            ScanJobCommandError::new("scanStateUnavailable", "Stan skanowania jest niedostępny.")
-        })?
-        .values()
-        .map(|job| job.public.clone())
-        .collect();
-    jobs.sort_by_key(|job| std::cmp::Reverse(job.started_at_unix_ms));
-    Ok(jobs)
+    service.list()
 }
 
 #[tauri::command]
@@ -410,6 +453,7 @@ fn emit_progress(service: &ScanService, app: &tauri::AppHandle, id: &str, progre
         job.total_supported_file_count = progress.total_supported_file_count;
         job.current_path = progress.current_path;
     }) {
+        crate::operations::emit_scan_operation(app, &job);
         let _ = app.emit("scan-progress", job);
     }
 }
@@ -429,6 +473,7 @@ fn emit_recognition_progress(
         job.history_cache_hit_count = progress.cache_hit_count;
         job.fully_hashed_file_count = progress.fully_hashed_file_count;
     }) {
+        crate::operations::emit_scan_operation(app, &job);
         let _ = app.emit("scan-progress", job);
     }
 }
@@ -438,6 +483,7 @@ fn emit_phase(service: &ScanService, app: &tauri::AppHandle, id: &str, phase: Me
         job.phase = phase;
         job.current_path = None;
     }) {
+        crate::operations::emit_scan_operation(app, &job);
         let _ = app.emit("scan-progress", job);
     }
 }
@@ -455,6 +501,7 @@ fn finish_message(service: &ScanService, app: &tauri::AppHandle, id: &str, messa
         job.status = MediaScanJobStatus::Failed;
         job.error = Some(message);
     }) {
+        crate::operations::emit_scan_operation(app, &job);
         let _ = app.emit("scan-progress", job);
     }
 }
@@ -465,6 +512,7 @@ fn finish_cancelled(service: &ScanService, app: &tauri::AppHandle, id: &str) {
         job.error = None;
         job.current_path = None;
     }) {
+        crate::operations::emit_scan_operation(app, &job);
         let _ = app.emit("scan-progress", job);
     }
 }

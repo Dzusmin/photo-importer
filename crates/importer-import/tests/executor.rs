@@ -1,6 +1,6 @@
 use std::fs;
 
-use importer_import::ImportExecutor;
+use importer_import::{ImportExecutionError, ImportExecutor};
 use importer_manifest::{
     FileCandidate, FileImportState, ImportManifest, ImportSessionOperation, ImportSessionStatus,
     NewImportOperation, NewImportSession,
@@ -84,6 +84,40 @@ fn copies_verifies_and_records_a_file_atomically() {
         }])
         .unwrap();
     assert_eq!(recognized[0].state, FileImportState::Imported);
+}
+
+#[test]
+fn marker_write_failure_prevents_completion_and_can_be_retried() {
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();
+    let session = session(&manifest, directory.path(), false, &["a.jpg"]);
+    let marker = directory
+        .path()
+        .join("library/party/.photo-importer-event.json");
+    fs::create_dir_all(&marker).unwrap();
+
+    let error = ImportExecutor::new(manifest.clone())
+        .execute_session(&session.id, |_| {})
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ImportExecutionError::WriteEventMarker { .. }
+    ));
+    let failed = manifest.get_import_session(&session.id).unwrap().unwrap();
+    assert_eq!(failed.status, ImportSessionStatus::Failed);
+    assert_eq!(failed.completed_file_count, 0);
+    assert!(directory.path().join("library/party/a.jpg").is_file());
+
+    fs::remove_dir(&marker).unwrap();
+    let completed = ImportExecutor::new(manifest)
+        .execute_session(&session.id, |_| {})
+        .unwrap();
+
+    assert_eq!(completed.status, ImportSessionStatus::Completed);
+    assert_eq!(completed.completed_file_count, 1);
+    assert_eq!(completed.operations[0].attempts, 2);
+    assert!(marker.is_file());
 }
 
 #[test]

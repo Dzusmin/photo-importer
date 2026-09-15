@@ -14,6 +14,8 @@ describe("systemStatus", () => {
       operatingSystem: "windows",
       architecture: "x86_64",
       backendStatus: "ready" as const,
+      importEngineStatus: "degraded" as const,
+      importEngineLastError: "Library is unavailable",
     };
     invoke.mockResolvedValue(status);
 

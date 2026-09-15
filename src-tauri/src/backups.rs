@@ -77,42 +77,42 @@ pub(crate) enum BackupPlanningJobStatus {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupJob {
-    id: String,
-    target_id: Uuid,
-    source_path: PathBuf,
-    target_path: PathBuf,
-    status: BackupJobStatus,
+    pub(crate) id: String,
+    pub(crate) target_id: Uuid,
+    pub(crate) source_path: PathBuf,
+    pub(crate) target_path: PathBuf,
+    pub(crate) status: BackupJobStatus,
     phase: BackupPhase,
-    processed_file_count: usize,
-    total_file_count: Option<usize>,
-    processed_bytes: u64,
-    total_bytes: Option<u64>,
+    pub(crate) processed_file_count: usize,
+    pub(crate) total_file_count: Option<usize>,
+    pub(crate) processed_bytes: u64,
+    pub(crate) total_bytes: Option<u64>,
     current_path: Option<PathBuf>,
     pause_requested: bool,
     started_at_unix_ms: u64,
-    updated_at_unix_ms: u64,
-    error: Option<String>,
+    pub(crate) updated_at_unix_ms: u64,
+    pub(crate) error: Option<String>,
     report: Option<BackupReport>,
 }
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct BackupPlanningJob {
-    id: String,
-    target_id: Uuid,
-    source_path: PathBuf,
-    target_path: PathBuf,
-    status: BackupPlanningJobStatus,
+    pub(crate) id: String,
+    pub(crate) target_id: Uuid,
+    pub(crate) source_path: PathBuf,
+    pub(crate) target_path: PathBuf,
+    pub(crate) status: BackupPlanningJobStatus,
     phase: BackupPhase,
-    processed_file_count: usize,
-    total_file_count: Option<usize>,
-    processed_bytes: u64,
-    total_bytes: Option<u64>,
+    pub(crate) processed_file_count: usize,
+    pub(crate) total_file_count: Option<usize>,
+    pub(crate) processed_bytes: u64,
+    pub(crate) total_bytes: Option<u64>,
     current_path: Option<PathBuf>,
     cancel_requested: bool,
     started_at_unix_ms: u64,
-    updated_at_unix_ms: u64,
-    error: Option<String>,
+    pub(crate) updated_at_unix_ms: u64,
+    pub(crate) error: Option<String>,
     plan: Option<BackupPlan>,
 }
 
@@ -185,6 +185,37 @@ impl BackupService {
 
     fn remove(&self, target_id: &str) -> Result<(), BackupCommandError> {
         let target_id = parse_target_id(target_id)?;
+        let has_active_backup = self
+            .jobs
+            .lock()
+            .map_err(|_| {
+                BackupCommandError::new("backupStateUnavailable", "Stan backupu jest niedostępny.")
+            })?
+            .values()
+            .any(|job| {
+                job.public.target_id == target_id
+                    && matches!(
+                        job.public.status,
+                        BackupJobStatus::Running | BackupJobStatus::Paused
+                    )
+            });
+        let has_active_planning = self
+            .planning_jobs
+            .lock()
+            .map_err(|_| {
+                BackupCommandError::new("backupStateUnavailable", "Stan backupu jest niedostępny.")
+            })?
+            .values()
+            .any(|job| {
+                job.public.target_id == target_id
+                    && job.public.status == BackupPlanningJobStatus::Running
+            });
+        if has_active_backup || has_active_planning {
+            return Err(BackupCommandError::new(
+                "backupTargetBusy",
+                "Nie można usunąć celu, gdy trwa dla niego planowanie lub backup.",
+            ));
+        }
         if !self
             .registry
             .remove(target_id)
@@ -271,7 +302,7 @@ impl BackupService {
         Some(job.clone())
     }
 
-    fn list_planning_jobs(&self) -> Result<Vec<BackupPlanningJob>, BackupCommandError> {
+    pub(crate) fn list_planning_jobs(&self) -> Result<Vec<BackupPlanningJob>, BackupCommandError> {
         let mut jobs: Vec<_> = self
             .planning_jobs
             .lock()
@@ -415,7 +446,7 @@ impl BackupService {
         Ok((public, engine, cancel, pause, true))
     }
 
-    fn list_jobs(&self) -> Result<Vec<BackupJob>, BackupCommandError> {
+    pub(crate) fn list_jobs(&self) -> Result<Vec<BackupJob>, BackupCommandError> {
         let mut jobs: Vec<_> = self
             .jobs
             .lock()
@@ -597,6 +628,7 @@ pub(crate) fn start_backup_planning_job(
     if !is_new {
         return Ok(job);
     }
+    crate::operations::emit_backup_planning_operation(&app, &job);
     let job_id = job.id.clone();
     let source_path = job.source_path.clone();
     let worker_service = service.inner().clone();
@@ -614,6 +646,7 @@ pub(crate) fn start_backup_planning_job(
                     job.cancel_requested = false;
                     job.plan = Some(plan);
                 }) {
+                    crate::operations::emit_backup_planning_operation(&app, &job);
                     let _ = app.emit("backup-planning-progress", job);
                 }
             }
@@ -698,6 +731,7 @@ pub(crate) fn start_backup_job(
     if !is_new {
         return Ok(job);
     }
+    crate::operations::emit_backup_operation(&app, &job);
     let job_id = job.id.clone();
     let worker_service = service.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
@@ -717,6 +751,7 @@ pub(crate) fn start_backup_job(
                             job.pause_requested = true;
                             job.current_path = None;
                         }) {
+                            crate::operations::emit_backup_operation(&app, &job);
                             let _ = app.emit("backup-progress", job);
                         }
                     }
@@ -728,6 +763,7 @@ pub(crate) fn start_backup_job(
                         job.status = BackupJobStatus::Running;
                         job.pause_requested = false;
                     }) {
+                        crate::operations::emit_backup_operation(&app, &job);
                         let _ = app.emit("backup-progress", job);
                     }
                 }
@@ -744,6 +780,7 @@ pub(crate) fn start_backup_job(
                     job.current_path = None;
                     job.report = Some(report);
                 }) {
+                    crate::operations::emit_backup_operation(&app, &job);
                     let _ = app.emit("backup-progress", job);
                 }
             }
@@ -781,25 +818,34 @@ pub(crate) fn get_backup_job(
 #[tauri::command]
 pub(crate) fn pause_backup_job(
     job_id: String,
+    app: tauri::AppHandle,
     service: tauri::State<'_, BackupService>,
 ) -> Result<BackupJob, BackupCommandError> {
-    service.control_job(&job_id, BackupControlAction::Pause)
+    let job = service.control_job(&job_id, BackupControlAction::Pause)?;
+    crate::operations::emit_backup_operation(&app, &job);
+    Ok(job)
 }
 
 #[tauri::command]
 pub(crate) fn resume_backup_job(
     job_id: String,
+    app: tauri::AppHandle,
     service: tauri::State<'_, BackupService>,
 ) -> Result<BackupJob, BackupCommandError> {
-    service.control_job(&job_id, BackupControlAction::Resume)
+    let job = service.control_job(&job_id, BackupControlAction::Resume)?;
+    crate::operations::emit_backup_operation(&app, &job);
+    Ok(job)
 }
 
 #[tauri::command]
 pub(crate) fn cancel_backup_job(
     job_id: String,
+    app: tauri::AppHandle,
     service: tauri::State<'_, BackupService>,
 ) -> Result<BackupJob, BackupCommandError> {
-    service.control_job(&job_id, BackupControlAction::Cancel)
+    let job = service.control_job(&job_id, BackupControlAction::Cancel)?;
+    crate::operations::emit_backup_operation(&app, &job);
+    Ok(job)
 }
 
 fn emit_job_progress(
@@ -816,6 +862,7 @@ fn emit_job_progress(
         job.total_bytes = progress.total_bytes;
         job.current_path = progress.current_path;
     }) {
+        crate::operations::emit_backup_operation(app, &job);
         let _ = app.emit("backup-progress", job);
     }
 }
@@ -834,6 +881,7 @@ fn emit_planning_progress(
         job.total_bytes = progress.total_bytes;
         job.current_path = progress.current_path;
     }) {
+        crate::operations::emit_backup_planning_operation(app, &job);
         let _ = app.emit("backup-planning-progress", job);
     }
 }
@@ -854,6 +902,7 @@ fn finish_planning_error(
         job.current_path = None;
         job.error = (!matches!(&error, BackupError::Cancelled)).then(|| error.to_string());
     }) {
+        crate::operations::emit_backup_planning_operation(app, &job);
         let _ = app.emit("backup-planning-progress", job);
     }
 }
@@ -869,6 +918,7 @@ fn finish_job_error(service: &BackupService, app: &tauri::AppHandle, id: &str, e
         job.current_path = None;
         job.error = (!matches!(&error, BackupError::Cancelled)).then(|| error.to_string());
     }) {
+        crate::operations::emit_backup_operation(app, &job);
         let _ = app.emit("backup-progress", job);
     }
 }
@@ -963,6 +1013,8 @@ mod tests {
         let (directory, service) = service();
         let disk = directory.path().join("disk");
         fs::create_dir(&disk).unwrap();
+        let backup_file = disk.join("existing-backup.jpg");
+        fs::write(&backup_file, b"backup contents").unwrap();
         let registered = service
             .register(
                 disk.clone(),
@@ -976,6 +1028,63 @@ mod tests {
 
         assert!(service.list().unwrap().is_empty());
         assert!(service.recognize(disk).unwrap().is_none());
+        assert_eq!(fs::read(backup_file).unwrap(), b"backup contents");
+    }
+
+    #[test]
+    fn commands_refuse_to_remove_a_target_with_active_planning() {
+        let (directory, service) = service();
+        let disk = directory.path().join("disk");
+        let source = directory.path().join("library");
+        fs::create_dir(&disk).unwrap();
+        fs::create_dir(&source).unwrap();
+        let registered = service
+            .register(
+                disk.clone(),
+                "Archiwum".to_owned(),
+                &AppSettings::default(),
+                &[],
+            )
+            .unwrap();
+        service
+            .begin_planning_job(&registered.id.to_string(), disk, source)
+            .unwrap();
+
+        let error = service.remove(&registered.id.to_string()).unwrap_err();
+
+        assert_eq!(error.code, "backupTargetBusy");
+        assert_eq!(service.list().unwrap()[0].id, registered.id);
+    }
+
+    #[test]
+    fn commands_refuse_to_remove_a_target_with_active_backup() {
+        let (directory, service) = service();
+        let disk = directory.path().join("disk");
+        let source = directory.path().join("library");
+        fs::create_dir(&disk).unwrap();
+        fs::create_dir(&source).unwrap();
+        fs::write(source.join("photo.jpg"), b"photo").unwrap();
+        let registered = service
+            .register(
+                disk.clone(),
+                "Archiwum".to_owned(),
+                &AppSettings::default(),
+                &[],
+            )
+            .unwrap();
+        let (planning_job, engine, _, _) = service
+            .begin_planning_job(&registered.id.to_string(), disk.clone(), source.clone())
+            .unwrap();
+        let plan = engine.plan(source).unwrap();
+        service.update_planning_job(&planning_job.id, |job| {
+            job.status = BackupPlanningJobStatus::Completed;
+        });
+        service.begin_job(&plan, disk).unwrap();
+
+        let error = service.remove(&registered.id.to_string()).unwrap_err();
+
+        assert_eq!(error.code, "backupTargetBusy");
+        assert_eq!(service.list().unwrap()[0].id, registered.id);
     }
 
     #[test]

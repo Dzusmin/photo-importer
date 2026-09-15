@@ -1,13 +1,23 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type Dispatch,
+  type SetStateAction,
+} from "react";
 import { open } from "@tauri-apps/plugin-dialog";
 import { listen } from "@tauri-apps/api/event";
 import { convertFileSrc } from "@tauri-apps/api/core";
 import {
   loadSettings,
+  importPlanSettingsRevision,
   normalizeSettingsError,
   saveSettings,
   type AppSettings,
 } from "../../shared/settings";
+import { useSettingsStore } from "../../shared/SettingsStore";
 import { acknowledgePendingSource } from "../../shared/background";
 import {
   buildImportPlanPreview,
@@ -73,6 +83,10 @@ import {
 } from "../../shared/appStatus";
 import { ErrorNotice } from "../../shared/ErrorNotice";
 import { activeIntlLocale, localize as l } from "../../i18n";
+import {
+  operationRouteKey,
+  type OperationRoute,
+} from "../../shared/operations";
 
 const ignoreHealthChange = () => undefined;
 
@@ -80,15 +94,26 @@ export function SourceScanner({
   appStatus = "ready",
   onHealthChange = ignoreHealthChange,
   openWorkflowId = null,
+  openOperationRoute = null,
+  onOpenHistory,
 }: {
   appStatus?: AppStatus;
   onHealthChange?: (healthy: boolean) => void;
   openWorkflowId?: string | null;
+  openOperationRoute?: Extract<
+    OperationRoute,
+    { kind: "scan" | "import" }
+  > | null;
+  onOpenHistory?: () => void;
 } = {}) {
   const [sources, setSources] = useState<SourceVolume[]>([]);
-  const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [localSettings, setLocalSettings] = useState<AppSettings | null>(null);
+  const settingsStore = useSettingsStore();
+  const settings = settingsStore?.settings ?? localSettings;
   const [scanningPath, setScanningPath] = useState<string | null>(null);
-  const [scanJob, setScanJob] = useState<MediaScanJob | null>(null);
+  const [scanJobsById, setScanJobsById] = useState<
+    Record<string, MediaScanJob>
+  >({});
   const [scanResult, setScanResult] = useState<SourceScanResponse | null>(null);
   const [streamedScans, setStreamedScans] = useState<
     Record<string, { path: string; items: MediaItem[] }>
@@ -127,11 +152,19 @@ export function SourceScanner({
   );
   const [importPlan, setImportPlan] = useState<ImportPlan | null>(null);
   const [planning, setPlanning] = useState(false);
-  const [importSession, setImportSession] = useState<ImportSession | null>(
-    null,
-  );
+  const [importSessionsById, setImportSessionsById] = useState<
+    Record<string, ImportSession>
+  >({});
+  const [selectedImportSessionId, setSelectedImportSessionId] = useState<
+    string | null
+  >(null);
+  const [pendingImportSessionIds, setPendingImportSessionIds] = useState<
+    Set<string>
+  >(new Set());
   const [importActionPending, setImportActionPending] = useState(false);
+  const [completedImportNotice, setCompletedImportNotice] = useState(false);
   const [writeSourceMarker, setWriteSourceMarker] = useState(true);
+  const [markerWritePending, setMarkerWritePending] = useState(false);
   const [pendingWorkflows, setPendingWorkflows] = useState<
     PendingSourceWorkflow[]
   >([]);
@@ -139,23 +172,178 @@ export function SourceScanner({
   const displayedScanRoot = useRef<string | null>(null);
   const displayedWorkflowId = useRef<string | null>(null);
   const scanSource = useRef<ScanSource | null>(null);
+  const displayedImportSessionId = useRef<string | null>(null);
   const metadataSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const workflowSaveQueues = useRef<Map<string, Promise<void>>>(new Map());
   const metadataLoadGeneration = useRef(0);
   const sourceRefreshInFlight = useRef<Promise<void> | null>(null);
   const previouslyOpenedWorkflowId = useRef<string | null>(null);
+  const focusedOperationRoute = useRef<string | null>(null);
   const cameraSources = useMemo(
     () => sources.filter((source) => source.likelyCameraSource),
     [sources],
   );
-  const journeyStep = importSession ? 3 : importPlan ? 2 : scanResult ? 1 : 0;
-  const journeyFinished = importSession?.status === "completed";
+  const activeScanJobs = useMemo(
+    () =>
+      Object.values(scanJobsById)
+        .filter((job) => job.status === "running")
+        .sort(
+          (left, right) =>
+            right.startedAtUnixMs - left.startedAtUnixMs ||
+            left.id.localeCompare(right.id),
+        ),
+    [scanJobsById],
+  );
+  const activeScanPaths = useMemo(
+    () => new Set(activeScanJobs.map((job) => job.path)),
+    [activeScanJobs],
+  );
+  const routedScanJob =
+    openOperationRoute?.kind === "scan"
+      ? (scanJobsById[openOperationRoute.scanId] ?? null)
+      : null;
+  const importSessions = useMemo(
+    () =>
+      Object.values(importSessionsById).sort(
+        (left, right) =>
+          right.createdAtUnixMs - left.createdAtUnixMs ||
+          left.id.localeCompare(right.id),
+      ),
+    [importSessionsById],
+  );
+  const scannedSource = scanResult
+    ? sources.find((source) => source.mountPath === scanResult.scan.root)
+    : undefined;
+  const scannedSourceBinding =
+    settings && scannedSource
+      ? bindingForSource(settings, scannedSource)
+      : undefined;
+  const markerWriteFailed = scannedSourceBinding?.markerState === "writeFailed";
+  const selectedImportSession = selectedImportSessionId
+    ? (importSessionsById[selectedImportSessionId] ?? null)
+    : scannedSource
+      ? (importSessions.find((session) =>
+          sourceMatchesSession(scannedSource, session),
+        ) ?? null)
+      : null;
+  displayedImportSessionId.current = selectedImportSession?.id ?? null;
+  const journeySession = selectedImportSession ?? importSessions[0] ?? null;
+  const journeyStep = journeySession ? 3 : importPlan ? 2 : scanResult ? 1 : 0;
+  const journeyFinished = journeySession?.status === "completed";
 
   useEffect(() => {
-    void loadSettings()
-      .then((response) => setSettings(response.settings))
-      .catch((error) => setMessage(normalizeSettingsError(error).message));
+    if (!openOperationRoute) {
+      focusedOperationRoute.current = null;
+      return;
+    }
+    if (openOperationRoute.kind === "import") {
+      setSelectedImportSessionId(openOperationRoute.importSessionId);
+    }
+    const key = operationRouteKey(openOperationRoute);
+    if (focusedOperationRoute.current === key) return;
+    const element = document.getElementById(operationElementId(key));
+    if (!element) return;
+    focusedOperationRoute.current = key;
+    element.focus({ preventScroll: true });
+    if (typeof element.scrollIntoView === "function") {
+      element.scrollIntoView({ block: "center" });
+    }
+  }, [importSessionsById, openOperationRoute, scanJobsById]);
+
+  const recordImportSession = useCallback((session: ImportSession) => {
+    if (session.status !== "completed") {
+      upsertImportSession(setImportSessionsById, session);
+      return;
+    }
+
+    setImportSessionsById((current) => {
+      const next = { ...current };
+      delete next[session.id];
+      return next;
+    });
+    setSelectedImportSessionId((current) =>
+      current === session.id ? null : current,
+    );
+
+    setCompletedImportNotice(true);
+    if (displayedImportSessionId.current !== session.id) return;
+
+    setScanResult(null);
+    setImportPlan(null);
+    setProfileDrafts(null);
+    setSelectedKeys(new Set());
+    setEventNames({});
+    setExcludedImportKeys(new Set());
+    setItemProfileAssignments({});
+    setExpandedEventIndexes(new Set());
+    setUserMetadata({});
+    setMetadataLoadedFor(null);
+    metadataLoadGeneration.current += 1;
+    displayedScanRoot.current = null;
+    displayedWorkflowId.current = null;
+    scanSource.current = null;
+    setMessage(null);
   }, []);
+
+  useEffect(() => {
+    if (settingsStore) return;
+    void loadSettings()
+      .then((response) => setLocalSettings(response.settings))
+      .catch((error) => setMessage(normalizeSettingsError(error).message));
+  }, [settingsStore]);
+
+  useEffect(() => {
+    if (!settings || !scanResult || !importPlan) return;
+    const workflow = pendingWorkflows.find(
+      (candidate) =>
+        candidate.sourceId === displayedWorkflowId.current ||
+        candidate.sourceRoot === scanResult.scan.root,
+    );
+    if (
+      !workflow ||
+      workflow.settingsRevision === importPlanSettingsRevision(settings)
+    )
+      return;
+
+    const invalidated: PendingSourceWorkflow = {
+      ...workflow,
+      state: "preparingPlan",
+      plan: null,
+      settingsSchemaVersion: settings.schemaVersion,
+      settingsRevision: importPlanSettingsRevision(settings),
+      editor: {
+        eventNames,
+        excludedItemKeys: [...excludedImportKeys],
+        itemProfileAssignments,
+        expandedEventIndexes: [...expandedEventIndexes],
+      },
+      error: null,
+      updatedAtUnixMs: Date.now(),
+    };
+    setImportPlan(null);
+    setPendingWorkflows((current) => [
+      invalidated,
+      ...current.filter(
+        (candidate) => candidate.sourceId !== invalidated.sourceId,
+      ),
+    ]);
+    void queueWorkflowSave(invalidated);
+    setMessage(
+      l(
+        "Settings affecting the import plan have changed — rebuild the plan.",
+        "Ustawienia wpływające na plan importu zmieniły się — przelicz plan ponownie.",
+      ),
+    );
+  }, [
+    eventNames,
+    excludedImportKeys,
+    expandedEventIndexes,
+    importPlan,
+    itemProfileAssignments,
+    pendingWorkflows,
+    scanResult,
+    settings,
+  ]);
 
   useEffect(() => {
     if (!openWorkflowId) return;
@@ -417,14 +605,21 @@ export function SourceScanner({
     let active = true;
     void listMediaScans()
       .then((jobs) => {
-        const running = jobs.find((job) => job.status === "running");
-        if (active && running) {
-          setScanJob(running);
-          setScanningPath(running.path);
+        if (!active) return;
+        const visible = jobs.filter((job) =>
+          ["running", "failed"].includes(job.status),
+        );
+        const running = visible.filter((job) => job.status === "running");
+        setScanJobsById((current) => mergeScanJobs(current, visible));
+        if (running.length > 0) {
           setMessage(
             l(
-              "The automatically started scan is running in the background…",
-              "Skan uruchomiony przez automat działa w tle…",
+              running.length === 1
+                ? "The automatically started scan is running in the background…"
+                : `${running.length} automatically started scans are running in the background…`,
+              running.length === 1
+                ? "Skan uruchomiony przez automat działa w tle…"
+                : `${running.length} skany uruchomione przez automat działają w tle…`,
             ),
           );
         }
@@ -440,20 +635,18 @@ export function SourceScanner({
     const unlisten = listen<MediaScanJob>("scan-progress", (event) => {
       if (!active) return;
       const job = event.payload;
-      setScanJob(job);
-      if (job.status === "completed" && job.result) {
+      upsertScanJob(setScanJobsById, job);
+      const concernsDisplayedSource = displayedScanRoot.current === job.path;
+      if (job.status === "completed" && job.result && concernsDisplayedSource) {
         applyCompletedScan(job.result, job.id);
-        setScanningPath(null);
-      } else if (job.status === "failed") {
+      } else if (job.status === "failed" && concernsDisplayedSource) {
         setMessage(
           job.error ?? l("Scanning failed.", "Skanowanie nie powiodło się."),
         );
-        setScanningPath(null);
-      } else if (job.status === "cancelled") {
+      } else if (job.status === "cancelled" && concernsDisplayedSource) {
         setMessage(
           l("Scanning was cancelled.", "Skanowanie zostało anulowane."),
         );
-        setScanningPath(null);
       }
     });
     return () => {
@@ -466,28 +659,20 @@ export function SourceScanner({
     let active = true;
     void listImportSessions()
       .then((sessions) => {
-        const unfinished = sessions.find((session) =>
-          [
-            "planned",
-            "queued",
-            "running",
-            "paused",
-            "failed",
-            "failedRecoverable",
-            "rollingBack",
-            "rollbackFailed",
-          ].includes(session.status),
+        if (!active) return;
+        const unfinished = sessions.filter(isVisibleImportSession);
+        setImportSessionsById((current) =>
+          mergeImportSessions(current, unfinished),
         );
-        if (active && unfinished) setImportSession(unfinished);
       })
       .catch(() => undefined);
     const unlisten = listen<ImportSession>("import-progress", (event) => {
-      if (active) setImportSession(event.payload);
+      if (active) recordImportSession(event.payload);
     });
     const unlistenRollback = listen<ImportSession>(
       "rollback-progress",
       (event) => {
-        if (active) setImportSession(event.payload);
+        if (active) recordImportSession(event.payload);
       },
     );
     return () => {
@@ -495,7 +680,7 @@ export function SourceScanner({
       void unlisten.then((stop) => stop());
       void unlistenRollback.then((stop) => stop());
     };
-  }, []);
+  }, [recordImportSession]);
 
   const refreshSources = useCallback(() => {
     if (sourceRefreshInFlight.current) return sourceRefreshInFlight.current;
@@ -552,7 +737,6 @@ export function SourceScanner({
     displayedScanRoot.current = path;
     displayedWorkflowId.current = null;
     setScanResult(null);
-    setStreamedScans({});
     setProfileDrafts(null);
     setWriteSourceMarker(true);
     setItemProfileAssignments({});
@@ -598,9 +782,10 @@ export function SourceScanner({
                 displayName: displayFileName(path),
               };
       const job = await startMediaScan(path);
-      setScanJob(job);
+      upsertScanJob(setScanJobsById, job);
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
+    } finally {
       setScanningPath(null);
     }
   }
@@ -653,8 +838,8 @@ export function SourceScanner({
     setMetadataLoadedFor(null);
     const settingsChanged =
       settings !== null &&
-      workflow.settingsRevision !== "" &&
-      workflow.settingsRevision !== JSON.stringify(settings.portable.naming);
+      workflow.plan !== null &&
+      workflow.settingsRevision !== importPlanSettingsRevision(settings);
     setScanResult(workflow.scan);
     void hydrateUserMetadata(workflow.scan.scan.root);
     setEventNames({
@@ -667,14 +852,32 @@ export function SourceScanner({
       new Set(workflow.editor.expandedEventIndexes ?? []),
     );
     setImportPlan(settingsChanged ? null : workflow.plan);
+    if (settingsChanged && settings) {
+      const invalidated: PendingSourceWorkflow = {
+        ...workflow,
+        state: "preparingPlan",
+        plan: null,
+        settingsSchemaVersion: settings.schemaVersion,
+        settingsRevision: importPlanSettingsRevision(settings),
+        error: null,
+        updatedAtUnixMs: Date.now(),
+      };
+      setPendingWorkflows((current) => [
+        invalidated,
+        ...current.filter(
+          (candidate) => candidate.sourceId !== invalidated.sourceId,
+        ),
+      ]);
+      void queueWorkflowSave(invalidated);
+    }
     setProfileDrafts(
       workflow.state === "awaitingProfileConfirmation" ? null : [],
     );
     setMessage(
       settingsChanged
         ? l(
-            "Naming settings have changed — rebuild the plan.",
-            "Ustawienia nazewnictwa zmieniły się — przelicz plan ponownie.",
+            "Settings affecting the import plan have changed — rebuild the plan.",
+            "Ustawienia wpływające na plan importu zmieniły się — przelicz plan ponownie.",
           )
         : workflow.state === "planReady"
           ? l(
@@ -769,9 +972,7 @@ export function SourceScanner({
       scan: result,
       plan: null,
       settingsSchemaVersion: settings?.schemaVersion ?? 0,
-      settingsRevision: settings
-        ? JSON.stringify(settings.portable.naming)
-        : "",
+      settingsRevision: settings ? importPlanSettingsRevision(settings) : "",
       editor,
       updatedAtUnixMs: Date.now(),
       error: null,
@@ -801,7 +1002,7 @@ export function SourceScanner({
         existing?.settingsSchemaVersion ?? settings?.schemaVersion ?? 0,
       settingsRevision:
         existing?.settingsRevision ??
-        (settings ? JSON.stringify(settings.portable.naming) : ""),
+        (settings ? importPlanSettingsRevision(settings) : ""),
       editor: {
         eventNames,
         excludedItemKeys: [...excludedImportKeys],
@@ -827,13 +1028,13 @@ export function SourceScanner({
       (candidate) => candidate.mountPath === scanResult.scan.root,
     );
     if (!source) return;
-    const cameraProfiles = [...settings.portable.cameraProfiles];
+    const newProfiles: AppSettings["portable"]["cameraProfiles"] = [];
     const selectedIds: string[] = [];
     for (const draft of profileDrafts) {
       if (draft.profileId === "unknown") continue;
       if (draft.profileId === "new") {
         const id = crypto.randomUUID();
-        cameraProfiles.push({
+        newProfiles.push({
           id,
           name: draft.name.trim() || l("New camera", "Nowy aparat"),
           exifMatchers: [draft.identity],
@@ -844,44 +1045,68 @@ export function SourceScanner({
         selectedIds.push(draft.profileId);
       }
     }
-    const markerUuid =
-      source.readOnly || !writeSourceMarker
-        ? null
-        : await ensureMediaSourceMarker(source.mountPath).catch(() => null);
-    const binding = {
-      id: crypto.randomUUID(),
-      sourceIdentity: {
-        markerUuid,
-        platformVolumeId: source.platformVolumeId,
-        fallbackFingerprint: source.fingerprint,
-      },
-      displayName: source.name.trim() || source.mountPath,
-      behavior: settings.portable.import.defaultSourceBehavior,
-      cameraProfileIds: [...new Set(selectedIds)],
-      markerState: source.readOnly
-        ? ("readOnly" as const)
-        : !writeSourceMarker
-          ? ("unknown" as const)
-          : markerUuid
-            ? ("written" as const)
-            : ("writeFailed" as const),
-      lastSeenAtUnixMs: Date.now(),
-    };
+    let markerUuid = source.markerUuid;
+    let markerWriteFailed = false;
+    if (!markerUuid && !source.readOnly && writeSourceMarker) {
+      try {
+        markerUuid = await ensureMediaSourceMarker(source.mountPath);
+      } catch {
+        markerWriteFailed = true;
+      }
+    }
     try {
-      const response = await saveSettings({
-        ...settings,
-        portable: { ...settings.portable, cameraProfiles },
-        local: {
-          ...settings.local,
-          sourceBindings: [
-            ...settings.local.sourceBindings.filter(
-              (item) => !bindingMatchesExactly(item, source),
-            ),
-            binding,
-          ],
-        },
+      const persist =
+        settingsStore?.updateSettings ??
+        (async (updater) => {
+          const response = await saveSettings(updater(settings));
+          setLocalSettings(response.settings);
+          return response;
+        });
+      const response = await persist((current) => {
+        const binding = {
+          id: crypto.randomUUID(),
+          sourceIdentity: {
+            markerUuid,
+            platformVolumeId: source.platformVolumeId,
+            fallbackFingerprint: source.fingerprint,
+          },
+          displayName: source.name.trim() || source.mountPath,
+          behavior:
+            markerWriteFailed &&
+            current.portable.import.defaultSourceBehavior === "autoImport"
+              ? "ask"
+              : current.portable.import.defaultSourceBehavior,
+          cameraProfileIds: [...new Set(selectedIds)],
+          markerState: source.readOnly
+            ? ("readOnly" as const)
+            : !writeSourceMarker
+              ? ("unknown" as const)
+              : markerUuid
+                ? ("written" as const)
+                : ("writeFailed" as const),
+          lastSeenAtUnixMs: Date.now(),
+        };
+        return {
+          ...current,
+          portable: {
+            ...current.portable,
+            cameraProfiles: [
+              ...current.portable.cameraProfiles,
+              ...newProfiles,
+            ],
+          },
+          local: {
+            ...current.local,
+            sourceBindings: [
+              ...current.local.sourceBindings.filter(
+                (item) => !bindingMatchesExactly(item, source),
+              ),
+              binding,
+            ],
+          },
+        };
       });
-      setSettings(response.settings);
+      if (!settingsStore) setLocalSettings(response.settings);
       setSources((current) =>
         current.map((candidate) =>
           candidate.mountPath === source.mountPath
@@ -901,18 +1126,103 @@ export function SourceScanner({
       await acknowledgePendingSource(source.mountPath).catch(() => undefined);
       setProfileDrafts([]);
       setMessage(
-        l(
-          "Camera profiles and card were approved.",
-          "Profile aparatów i karta zostały zatwierdzone.",
-        ),
+        markerWriteFailed
+          ? l(
+              "Camera profiles were approved, but the card identifier could not be saved. Automatic import remains disabled. Try saving the identifier again.",
+              "Profile aparatów zostały zatwierdzone, ale nie udało się zapisać identyfikatora karty. Automatyczny import pozostaje wyłączony. Spróbuj ponownie zapisać identyfikator.",
+            )
+          : l(
+              "Camera profiles and card were approved.",
+              "Profile aparatów i karta zostały zatwierdzone.",
+            ),
       );
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     }
   }
 
-  async function cancelScan() {
-    if (!scanJob || scanJob.status !== "running") return;
+  async function retrySourceMarker() {
+    if (
+      !settings ||
+      !scannedSource ||
+      !scannedSourceBinding ||
+      scannedSource.readOnly
+    )
+      return;
+    setMarkerWritePending(true);
+    try {
+      const markerUuid = await ensureMediaSourceMarker(scannedSource.mountPath);
+      const persist =
+        settingsStore?.updateSettings ??
+        (async (updater) => {
+          const response = await saveSettings(updater(settings));
+          setLocalSettings(response.settings);
+          return response;
+        });
+      const response = await persist((current) => ({
+        ...current,
+        local: {
+          ...current.local,
+          sourceBindings: current.local.sourceBindings.map((binding) =>
+            binding.id === scannedSourceBinding.id
+              ? {
+                  ...binding,
+                  sourceIdentity: {
+                    ...binding.sourceIdentity,
+                    markerUuid,
+                  },
+                  behavior:
+                    current.portable.import.defaultSourceBehavior ===
+                    "autoImport"
+                      ? "autoImport"
+                      : binding.behavior,
+                  markerState: "written" as const,
+                  lastSeenAtUnixMs: Date.now(),
+                }
+              : binding,
+          ),
+        },
+      }));
+      if (!settingsStore) setLocalSettings(response.settings);
+      setSources((current) =>
+        current.map((source) =>
+          source.mountPath === scannedSource.mountPath
+            ? { ...source, markerUuid }
+            : source,
+        ),
+      );
+      if (scanSource.current?.kind === "volume") {
+        scanSource.current = {
+          ...scanSource.current,
+          sourceId: `marker:${markerUuid}`,
+          identity: {
+            markerUuid,
+            platformVolumeId: scannedSource.platformVolumeId,
+            fallbackFingerprint: scannedSource.fingerprint,
+          },
+        };
+        displayedWorkflowId.current = `marker:${markerUuid}`;
+      }
+      setMessage(
+        l(
+          "The card identifier was saved. Safe automatic import is now available.",
+          "Identyfikator karty został zapisany. Bezpieczny automatyczny import jest teraz dostępny.",
+        ),
+      );
+    } catch {
+      setMessage(
+        l(
+          "Camera profiles are approved, but the card identifier still could not be saved. Automatic import remains disabled.",
+          "Profile aparatów są zatwierdzone, ale nadal nie udało się zapisać identyfikatora karty. Automatyczny import pozostaje wyłączony.",
+        ),
+      );
+    } finally {
+      setMarkerWritePending(false);
+    }
+  }
+
+  async function cancelScan(scanJob: MediaScanJob) {
+    if (scanJob.status !== "running") return;
     try {
       await cancelMediaScan(scanJob.id);
       setMessage(
@@ -1105,7 +1415,7 @@ export function SourceScanner({
           scan: scanResult,
           plan,
           settingsSchemaVersion: settings.schemaVersion,
-          settingsRevision: JSON.stringify(settings.portable.naming),
+          settingsRevision: importPlanSettingsRevision(settings),
           editor: {
             eventNames,
             excludedItemKeys: [...excludedImportKeys],
@@ -1153,7 +1463,51 @@ export function SourceScanner({
     selectedPlan: ImportPlan | null = importPlan,
     selectedScan: SourceScanResponse | null = scanResult,
   ) {
-    if (!selectedPlan || selectedPlan.status !== "ready" || !settings) return;
+    if (
+      !selectedPlan ||
+      selectedPlan.status !== "ready" ||
+      !selectedScan ||
+      !settings
+    )
+      return;
+    const workflow = pendingWorkflows.find(
+      (candidate) => candidate.scan?.scan.root === selectedScan.scan.root,
+    );
+    const selectedSource =
+      displayedScanRoot.current === selectedScan.scan.root
+        ? scanSource.current
+        : workflow?.sourceId.startsWith("directory:")
+          ? directoryScanSource(workflow.sourceRoot, workflow.displayName)
+          : workflow
+            ? {
+                kind: "volume" as const,
+                sourceId: workflow.sourceId,
+                identity: workflow.sourceIdentity,
+                displayName: workflow.displayName,
+              }
+            : null;
+    const directoryRoot =
+      selectedSource?.kind === "directory" ? selectedScan.scan.root : null;
+    const expectedIdentity =
+      selectedSource?.kind === "volume" ? selectedSource.identity : null;
+    const source = expectedIdentity
+      ? sources.find((candidate) =>
+          sourceMatchesIdentityInObservation(
+            candidate,
+            expectedIdentity,
+            selectedScan.scan.root,
+          ),
+        )
+      : undefined;
+    if (!directoryRoot && (!expectedIdentity || !source)) {
+      setMessage(
+        l(
+          "The scanned card is unavailable or does not match the prepared plan. Reconnect the correct card and try again.",
+          "Zeskanowana karta jest niedostępna albo nie odpowiada przygotowanemu planowi. Podłącz właściwą kartę i spróbuj ponownie.",
+        ),
+      );
+      return;
+    }
     const moving =
       settings.portable.import.defaultOperation === "moveAfterVerification";
     const confirmMove =
@@ -1167,37 +1521,26 @@ export function SourceScanner({
     if (!confirmMove) return;
     setImportActionPending(true);
     try {
-      const source = sources.find(
-        (candidate) => candidate.mountPath === selectedScan?.scan.root,
-      );
       const session = await createImportSession(
         selectedPlan,
         source?.fingerprint ?? null,
-        source
-          ? {
-              markerUuid: source.markerUuid,
-              platformVolumeId: source.platformVolumeId,
-              fallbackFingerprint: source.fingerprint,
-            }
-          : null,
+        expectedIdentity,
         confirmMove,
       );
-      setImportSession(session);
-      if (selectedScan) {
-        const workflow = pendingWorkflows.find(
-          (candidate) => candidate.scan?.scan.root === selectedScan.scan.root,
-        );
-        if (workflow)
-          await deletePendingSourceWorkflow(workflow.sourceId).catch(
-            () => undefined,
-          );
-        setPendingWorkflows((current) =>
-          current.filter(
-            (candidate) => candidate.sourceId !== workflow?.sourceId,
-          ),
-        );
-      }
-      await startImportSession(session.id);
+      setSelectedImportSessionId(session.id);
+      displayedImportSessionId.current = session.id;
+      recordImportSession(session);
+      const startedSession = await startImportSession(
+        session.id,
+        directoryRoot,
+      );
+      recordImportSession(startedSession);
+      if (workflow) await deletePendingSourceWorkflow(workflow.sourceId);
+      setPendingWorkflows((current) =>
+        current.filter(
+          (candidate) => candidate.sourceId !== workflow?.sourceId,
+        ),
+      );
       setMessage(l("Import started.", "Import został rozpoczęty."));
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
@@ -1285,9 +1628,13 @@ export function SourceScanner({
     }
   }
 
-  async function controlImport(action: "resume" | "pause" | "cancel") {
-    if (!importSession) return;
-    setImportActionPending(true);
+  async function controlImport(
+    importSession: ImportSession,
+    action: "resume" | "pause" | "cancel",
+  ) {
+    setPendingImportSessionIds((current) =>
+      new Set(current).add(importSession.id),
+    );
     try {
       let cancelMode: "keepCompleted" | "rollbackSession" = "keepCompleted";
       if (action === "cancel") {
@@ -1309,30 +1656,45 @@ export function SourceScanner({
           ? "rollbackSession"
           : "keepCompleted";
       }
+      const observedSourceRoot =
+        importSession.sourceIdentity || importSession.sourceFingerprint
+          ? (sources.find((source) =>
+              sourceMatchesSession(source, importSession),
+            )?.mountPath ?? null)
+          : (scanResult?.scan.root ?? null);
+      if (action === "resume" && !observedSourceRoot) {
+        setMessage(
+          l(
+            "The original card observation is unavailable. Reconnect the identified card instead of a similar unmarked card.",
+            "Pierwotna obserwacja karty jest niedostępna. Podłącz zidentyfikowaną kartę zamiast podobnej nieoznaczonej karty.",
+          ),
+        );
+        return;
+      }
       const session =
         action === "resume"
-          ? await startImportSession(
-              importSession.id,
-              sources.find((source) =>
-                sourceMatchesSession(source, importSession),
-              )?.mountPath ?? null,
-            )
+          ? await startImportSession(importSession.id, observedSourceRoot)
           : action === "pause"
             ? await pauseImportSession(importSession.id)
             : await cancelImportSession(importSession.id, cancelMode);
-      setImportSession(session);
+      recordImportSession(session);
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     } finally {
-      setImportActionPending(false);
+      setPendingImportSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(importSession.id);
+        return next;
+      });
     }
   }
 
-  async function retryRollback() {
-    if (!importSession) return;
-    setImportActionPending(true);
+  async function retryRollback(importSession: ImportSession) {
+    setPendingImportSessionIds((current) =>
+      new Set(current).add(importSession.id),
+    );
     try {
-      setImportSession(await retryImportRollback(importSession.id));
+      recordImportSession(await retryImportRollback(importSession.id));
       setMessage(
         l(
           "Safe session rollback was retried.",
@@ -1342,7 +1704,11 @@ export function SourceScanner({
     } catch (error) {
       setMessage(normalizeSettingsError(error).message);
     } finally {
-      setImportActionPending(false);
+      setPendingImportSessionIds((current) => {
+        const next = new Set(current);
+        next.delete(importSession.id);
+        return next;
+      });
     }
   }
 
@@ -1350,6 +1716,25 @@ export function SourceScanner({
     <>
       {(journeyStep > 0 || journeyFinished) && (
         <ImportJourney currentStep={journeyStep} finished={journeyFinished} />
+      )}
+      {completedImportNotice && (
+        <section className="import-complete-notice" role="status">
+          <span>{l("Import completed.", "Import został zakończony.")}</span>
+          <div>
+            {onOpenHistory && (
+              <button type="button" onClick={onOpenHistory}>
+                {l("View history", "Przejdź do historii")}
+              </button>
+            )}
+            <button
+              type="button"
+              className="ghost"
+              onClick={() => setCompletedImportNotice(false)}
+            >
+              {l("Dismiss", "Zamknij")}
+            </button>
+          </div>
+        </section>
       )}
       <section className="source-hero">
         <div>
@@ -1386,6 +1771,21 @@ export function SourceScanner({
               {message}
             </p>
           )}
+          {markerWriteFailed && (
+            <button
+              type="button"
+              className="secondary"
+              disabled={markerWritePending}
+              onClick={() => void retrySourceMarker()}
+            >
+              {markerWritePending
+                ? l("Saving identifier…", "Zapisywanie identyfikatora…")
+                : l(
+                    "Retry saving card identifier",
+                    "Ponów zapis identyfikatora karty",
+                  )}
+            </button>
+          )}
         </div>
         <div className="source-hero__status">
           <span className="source-count">
@@ -1413,14 +1813,43 @@ export function SourceScanner({
         />
       )}
 
-      {scanJob?.status === "running" && (
-        <>
-          <ScanProgressPanel job={scanJob} onCancel={() => void cancelScan()} />
-          {streamedScans[scanJob.id]?.path === scanJob.path &&
-            streamedScans[scanJob.id].items.length > 0 && (
-              <StreamingScanPreview items={streamedScans[scanJob.id].items} />
-            )}
-        </>
+      {activeScanJobs.length > 0 && (
+        <section
+          className="scan-jobs"
+          aria-label={l("Active scans", "Aktywne skany")}
+        >
+          {activeScanJobs.map((scanJob) => (
+            <div key={scanJob.id}>
+              <ScanProgressPanel
+                job={scanJob}
+                focused={
+                  openOperationRoute?.kind === "scan" &&
+                  openOperationRoute.scanId === scanJob.id
+                }
+                onCancel={() => void cancelScan(scanJob)}
+              />
+              {streamedScans[scanJob.id]?.path === scanJob.path &&
+                streamedScans[scanJob.id].items.length > 0 && (
+                  <StreamingScanPreview
+                    items={streamedScans[scanJob.id].items}
+                  />
+                )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {routedScanJob && routedScanJob.status !== "running" && (
+        <section
+          className="scan-jobs"
+          aria-label={l("Selected scan", "Wybrany skan")}
+        >
+          <ScanProgressPanel
+            job={routedScanJob}
+            focused
+            onCancel={() => undefined}
+          />
+        </section>
       )}
 
       {cameraSources.length > 0 && (
@@ -1491,9 +1920,13 @@ export function SourceScanner({
                     onClick={() =>
                       void runScan(source.mountPath, undefined, source)
                     }
-                    disabled={scanningPath !== null}
+                    disabled={
+                      scanningPath === source.mountPath ||
+                      activeScanPaths.has(source.mountPath)
+                    }
                   >
-                    {scanningPath === source.mountPath
+                    {scanningPath === source.mountPath ||
+                    activeScanPaths.has(source.mountPath)
                       ? l("Scanning…", "Skanowanie…")
                       : l("Scan", "Skanuj")}
                   </button>
@@ -1528,13 +1961,25 @@ export function SourceScanner({
         </section>
       )}
 
-      {importSession && !scanResult && (
-        <ImportSessionProgress
-          session={importSession}
-          actionPending={importActionPending}
-          onControl={(action) => void controlImport(action)}
-          onRetryRollback={() => void retryRollback()}
-        />
+      {importSessions.length > 0 && (
+        <section
+          className="import-sessions"
+          aria-label={l("Import sessions", "Sesje importu")}
+        >
+          {importSessions.map((session) => (
+            <ImportSessionProgress
+              key={session.id}
+              session={session}
+              focused={
+                openOperationRoute?.kind === "import" &&
+                openOperationRoute.importSessionId === session.id
+              }
+              actionPending={pendingImportSessionIds.has(session.id)}
+              onControl={(action) => void controlImport(session, action)}
+              onRetryRollback={() => void retryRollback(session)}
+            />
+          ))}
+        </section>
       )}
 
       {scanResult && (
@@ -1563,7 +2008,9 @@ export function SourceScanner({
             correctionUnit={correctionUnit}
             onCorrectionUnitChange={setCorrectionUnit}
             onApplyCorrection={() => void applyCorrection()}
-            busy={scanningPath !== null}
+            busy={
+              scanningPath !== null || activeScanPaths.has(scanResult.scan.root)
+            }
             filter={resultFilter}
             onFilterChange={setResultFilter}
             ratingFilter={ratingFilter}
@@ -1599,14 +2046,12 @@ export function SourceScanner({
             planning={planning}
             onPrepareImportPlan={() => void prepareImportPlan(false)}
             onDeleteImportPlan={() => void deleteImportPlan()}
-            importSession={importSession}
+            importSession={selectedImportSession}
             importActionPending={importActionPending}
             onBeginImport={() => void beginImport()}
             importOperation={
               settings?.portable.import.defaultOperation ?? "copy"
             }
-            onControlImport={(action) => void controlImport(action)}
-            onRetryRollback={() => void retryRollback()}
             cameraProfiles={settings?.portable.cameraProfiles ?? []}
             itemProfileAssignments={itemProfileAssignments}
             onItemProfileAssignment={(key, profileId) => {
@@ -1828,8 +2273,6 @@ function ScanResults({
   importActionPending,
   onBeginImport,
   importOperation,
-  onControlImport,
-  onRetryRollback,
   cameraProfiles,
   itemProfileAssignments,
   onItemProfileAssignment,
@@ -1865,8 +2308,6 @@ function ScanResults({
   importActionPending: boolean;
   onBeginImport: () => void;
   importOperation: AppSettings["portable"]["import"]["defaultOperation"];
-  onControlImport: (action: "resume" | "pause" | "cancel") => void;
-  onRetryRollback: () => void;
   cameraProfiles: AppSettings["portable"]["cameraProfiles"];
   itemProfileAssignments: Record<string, string>;
   onItemProfileAssignment: (key: string, profileId: string) => void;
@@ -2647,14 +3088,6 @@ function ScanResults({
             }
           />
         )}
-        {importSession && (
-          <ImportSessionProgress
-            session={importSession}
-            actionPending={importActionPending}
-            onControl={onControlImport}
-            onRetryRollback={onRetryRollback}
-          />
-        )}
       </section>
       {result.scan.warnings.length > 0 && (
         <details className="scan-warnings">
@@ -2718,9 +3151,11 @@ function EventImportCheckbox({
 
 function ScanProgressPanel({
   job,
+  focused,
   onCancel,
 }: {
   job: MediaScanJob;
+  focused: boolean;
   onCancel: () => void;
 }) {
   const determinate =
@@ -2732,10 +3167,24 @@ function ScanProgressPanel({
       )
     : 0;
   return (
-    <section className="scan-progress-panel" aria-live="polite">
+    <section
+      id={operationElementId(`scan:${job.id}`)}
+      className={`scan-progress-panel${focused ? " operation-focus" : ""}`}
+      tabIndex={-1}
+      aria-label={l(`Scan ${job.path}`, `Skan ${job.path}`)}
+      aria-live="polite"
+    >
       <div>
-        <span className="section-label">{l("SCANNING", "SKANOWANIE")}</span>
-        <h3>{scanPhaseLabel(job.phase)}</h3>
+        <span className="section-label">
+          {l("SCANNING", "SKANOWANIE")} · {job.path}
+        </span>
+        <h3>
+          {job.status === "failed"
+            ? l("Scanning failed", "Skanowanie nie powiodło się")
+            : job.status === "cancelled"
+              ? l("Scanning was cancelled", "Skanowanie zostało anulowane")
+              : scanPhaseLabel(job.phase)}
+        </h3>
         <p>
           {job.phase === "discovering"
             ? l(
@@ -2759,6 +3208,7 @@ function ScanProgressPanel({
                 "Duże karty i pliki RAW mogą wymagać kilku minut. Możesz chwilę poczekać albo anulować skanowanie.",
               )}
         </small>
+        {job.error && <p className="import-error">{job.error}</p>}
       </div>
       <div
         className={`scan-progress-track ${determinate ? "" : "scan-progress-track--indeterminate"}`}
@@ -2773,9 +3223,11 @@ function ScanProgressPanel({
       >
         <span style={determinate ? { width: `${percentage}%` } : undefined} />
       </div>
-      <button type="button" className="ghost" onClick={onCancel}>
-        {l("Cancel scanning", "Anuluj skanowanie")}
-      </button>
+      {job.status === "running" && (
+        <button type="button" className="ghost" onClick={onCancel}>
+          {l("Cancel scanning", "Anuluj skanowanie")}
+        </button>
+      )}
     </section>
   );
 }
@@ -3354,11 +3806,13 @@ function ImportPlanPreview({
 
 function ImportSessionProgress({
   session,
+  focused,
   actionPending,
   onControl,
   onRetryRollback,
 }: {
   session: ImportSession;
+  focused: boolean;
   actionPending: boolean;
   onControl: (action: "resume" | "pause" | "cancel") => void;
   onRetryRollback: () => void;
@@ -3384,7 +3838,16 @@ function ImportSessionProgress({
       ? (session.totalSizeBytes - session.completedSizeBytes) / bytesPerSecond
       : 0;
   return (
-    <section className="import-progress-panel" aria-live="polite">
+    <section
+      id={operationElementId(`import:${session.id}`)}
+      className={`import-progress-panel${focused ? " operation-focus" : ""}`}
+      tabIndex={-1}
+      aria-label={l(
+        `Import session ${session.id}`,
+        `Sesja importu ${session.id}`,
+      )}
+      aria-live="polite"
+    >
       <div className="import-progress-panel__heading">
         <div>
           <span className="section-label">
@@ -3531,9 +3994,9 @@ function workflowMatchesSource(
 }
 
 function sourceWorkflowId(source: SourceVolume) {
-  return source.markerUuid
-    ? `marker:${source.markerUuid}`
-    : `unverified:${source.fingerprint}`;
+  if (source.markerUuid) return `marker:${source.markerUuid}`;
+  if (source.platformVolumeId) return `platform:${source.platformVolumeId}`;
+  return `unverified:${source.fingerprint}:${source.mountPath}`;
 }
 
 function volumeScanSource(source: SourceVolume): ScanSource {
@@ -3582,17 +4045,122 @@ function sourceMatchesIdentity(
   return source.fingerprint === identity.fallbackFingerprint;
 }
 
+function sourceMatchesIdentityInObservation(
+  source: SourceVolume,
+  identity: SourceIdentity,
+  observedRoot: string,
+): boolean {
+  if (identity.markerUuid !== null || identity.platformVolumeId !== null) {
+    return sourceMatchesIdentity(source, identity);
+  }
+  return (
+    source.mountPath === observedRoot &&
+    source.fingerprint === identity.fallbackFingerprint
+  );
+}
+
 function sourceMatchesSession(source: SourceVolume, session: ImportSession) {
   const identity = session.sourceIdentity;
-  if (!identity) return source.fingerprint === session.sourceFingerprint;
+  if (!identity)
+    return (
+      source.fingerprint === session.sourceFingerprint &&
+      sessionOperationsBelongToRoot(session, source.mountPath)
+    );
   const strongMatch =
     (identity.markerUuid !== null &&
       identity.markerUuid === source.markerUuid) ||
     (identity.platformVolumeId !== null &&
       identity.platformVolumeId === source.platformVolumeId);
-  return identity.markerUuid !== null || identity.platformVolumeId !== null
-    ? strongMatch
-    : identity.fallbackFingerprint === source.fingerprint;
+  if (identity.markerUuid !== null || identity.platformVolumeId !== null) {
+    return strongMatch;
+  }
+  return (
+    identity.fallbackFingerprint === source.fingerprint &&
+    sessionOperationsBelongToRoot(session, source.mountPath)
+  );
+}
+
+function sessionOperationsBelongToRoot(
+  session: ImportSession,
+  root: string,
+): boolean {
+  if (session.operations.length === 0) return false;
+  const normalizedRoot = normalizePath(root).replace(/\/$/, "");
+  return session.operations.every((operation) => {
+    const relative = normalizePath(operation.sourceRelativePath).replace(
+      /^\/+/,
+      "",
+    );
+    return (
+      normalizePath(operation.sourcePath) === `${normalizedRoot}/${relative}`
+    );
+  });
+}
+
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+$/, "");
+}
+
+function isVisibleImportSession(session: ImportSession) {
+  return !["completed", "cancelled"].includes(session.status);
+}
+
+function operationElementId(key: string) {
+  return `operation-${encodeURIComponent(key)}`;
+}
+
+function upsertScanJob(
+  setJobs: Dispatch<SetStateAction<Record<string, MediaScanJob>>>,
+  job: MediaScanJob,
+) {
+  setJobs((current) => {
+    const previous = current[job.id];
+    if (previous && previous.updatedAtUnixMs > job.updatedAtUnixMs) {
+      return current;
+    }
+    return { ...current, [job.id]: job };
+  });
+}
+
+function mergeScanJobs(
+  current: Record<string, MediaScanJob>,
+  jobs: MediaScanJob[],
+) {
+  const next = { ...current };
+  for (const job of jobs) {
+    const previous = next[job.id];
+    if (!previous || previous.updatedAtUnixMs < job.updatedAtUnixMs) {
+      next[job.id] = job;
+    }
+  }
+  return next;
+}
+
+function upsertImportSession(
+  setSessions: Dispatch<SetStateAction<Record<string, ImportSession>>>,
+  session: ImportSession,
+) {
+  setSessions((current) => {
+    const previous = current[session.id];
+    if (previous && previous.updatedAtUnixMs > session.updatedAtUnixMs) {
+      return current;
+    }
+    return { ...current, [session.id]: session };
+  });
+}
+
+function mergeImportSessions(
+  current: Record<string, ImportSession>,
+  sessions: ImportSession[],
+) {
+  const next = { ...current };
+  for (const session of sessions) {
+    const previous = next[session.id];
+    if (!previous || previous.updatedAtUnixMs < session.updatedAtUnixMs) {
+      next[session.id] = session;
+    }
+  }
+  return next;
 }
 
 function bindingForSource(settings: AppSettings, source: SourceVolume) {

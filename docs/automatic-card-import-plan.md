@@ -1,18 +1,29 @@
 # Automatic import preparation when a card is connected
 
+> **Status (updated 2026-09-15):** This document records the feature design and
+> implementation history. The current implementation and its automated tests
+> are the executable source of truth; the current-behavior notes below override
+> older future-tense stage descriptions in this document. `README.md` provides
+> the shorter operational summary.
+
 ## Goal
 
 After detecting a card, the application should recognize known media, read
 camera profiles from EXIF, run a background scan, and prepare an import plan.
-The import itself must always require the user to explicitly approve the plan.
+Copying normally waits for explicit approval. A card explicitly configured for
+`autoImport` may start copying without another approval, but only after a fresh
+scan and all of the safety gates described under **Automatic plan preparation**
+have passed.
 
 This stage covers source cards. Automatic library backup to an external drive
 remains a separate, later stage.
 
 ## Agreed behavior
 
-- Behavior is configured separately for each card: `ask`, `autoPreparePlan`, or
-  `ignore`.
+- Behavior is resolved for each known card as `ask`, `autoPreparePlan`,
+  `autoImport`, or `ignore`. An explicit non-`ask` card binding wins; otherwise
+  the assigned camera-profile behavior and then the global default are used. A
+  probable match based only on weak identity is forced to `ask`.
 - An unknown card always requires confirmation of the detected camera profiles.
 - A profile receives a default name based on `Make` and `Model`, but the user
   can change it before saving.
@@ -31,8 +42,9 @@ remains a separate, later stage.
 - Pause and cancellation are honored between complete media sets (for example,
   RAW+JPEG+XMP), not between files within one set.
 - Disconnecting a card stops the session with a recoverable error.
-- Reconnecting the same card identifies the matching session without a full
-  rescan.
+- Reconnecting the same card can identify and integrity-check an interrupted
+  import session without a full rescan. Reconnecting a card with a restored
+  plan and `autoImport` performs a fresh scan before it may copy anything.
 - After a restart, resumption requires confirmation by default. Users may
   enable automatic resumption.
 - Cancellation can either keep completed files or roll back only the files
@@ -66,7 +78,7 @@ SourceBinding
   id
   sourceIdentity
   displayName
-  behavior: ask | autoPreparePlan | ignore
+  behavior: ask | autoPreparePlan | autoImport | ignore
   cameraProfileIds[]
   markerState
   lastSeenAtUnixMs
@@ -200,20 +212,22 @@ card is detected again and returns to the appropriate state.
 
 The `ask` mode creates `awaitingDecision`. `autoPreparePlan` starts a scan but
 stops at `awaitingProfileConfirmation` when profile changes have not been
-approved. `ignore` sets `ignoredUntilDisconnect`.
+approved. `autoImport` also starts a scan and may continue from a safe, ready
+plan to a copy session as described below. `ignore` sets
+`ignoredUntilDisconnect`.
 
 The “Ignore this time” command never saves a persistent behavior change.
 
 ## Automatic plan preparation
 
-After a scan finishes, the automation should use the same domain and IPC path
-as a manual scan:
+After a scan finishes, the automation uses the same domain and job path as a
+manual scan:
 
 1. compare content with the import manifest,
 2. match or confirm camera profiles,
 3. create default event names,
 4. prepare the plan,
-5. save the plan as pending approval,
+5. save the plan as ready,
 6. emit a `plan-ready` event and a system notification.
 
 `ImportPlan` must be extended with camera sections or a stable
@@ -221,9 +235,26 @@ as a manual scan:
 `camera_model`, `camera_alias`) must be calculated per item, rather than once
 for the entire scan as it is now.
 
-The plan must not start copying automatically. Users may change camera
-assignments, event names, and exclusions; each such change invalidates the
-previous plan and requires it to be recalculated.
+For `ask` and `autoPreparePlan`, the ready plan waits for the user. For
+`autoImport`, the monitor starts copying only when all of these gates pass:
+
+- the connected card has the durable marker UUID written by the application,
+- the plan was rebuilt from a fresh scan of that connected card,
+- the saved plan's settings fingerprint matches the current settings,
+- the operation is `Copy` (automatic move is never allowed),
+- the workflow and plan are ready, the plan is non-empty, and it has no
+  conflicts or unresolved decisions.
+
+If any gate fails, copying does not start and the workflow becomes a durable
+`failedRecoverable` item requiring attention. A restored `autoImport` workflow
+does not blindly execute its saved plan: it performs a fresh scan and rebuilds
+the plan. Manual event names, exclusions, and camera assignments are retained
+only where they still match current items and valid camera profiles; ambiguous
+or stale edits are discarded. Other restored behaviors preserve the saved plan
+for the user.
+
+Users may change camera assignments, event names, and exclusions; each such
+change invalidates the previous plan and requires it to be recalculated.
 
 The ready-plan state must be persisted, preferably in SQLite alongside import
 sessions. Do not store it only as a React object or in process memory. The
@@ -432,8 +463,9 @@ and “Unknown camera” without automatically saving a profile.
 - Automatic plan preparation and persistence.
 - Per-item naming context.
 
-Acceptance criterion: automatic mode ends with a ready, unapproved plan even
-when the application window is hidden.
+Acceptance criterion: `autoPreparePlan` ends with a ready plan even when the
+application window is hidden; `autoImport` may continue to copying only after a
+fresh scan and every documented safety gate succeeds.
 
 ### Stage 5 — resilient import session
 
@@ -515,7 +547,8 @@ Test an installed build on every operating system, not only development mode:
 
 The feature is complete when:
 
-1. no automatic path starts an import without plan approval,
+1. only an explicitly configured `autoImport` path can start without another
+   approval, and only after a fresh scan and every documented safety gate,
 2. profiles detected from EXIF are never saved without confirmation,
 3. behavior is independent for each card,
 4. pause and cancellation do not split a RAW+JPEG+XMP set,

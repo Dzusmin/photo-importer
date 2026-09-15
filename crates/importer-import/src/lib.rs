@@ -9,7 +9,7 @@ use importer_manifest::{
     ImportManifest, ImportOperationRecord, ImportSession, ImportSessionOperation,
     ImportSessionStatus, ImportedFileRecord, ManifestError, OperationStatus, hash_file,
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use tempfile::TempPath;
 use thiserror::Error;
 
@@ -51,6 +51,12 @@ pub enum ImportExecutionError {
     VerificationFailed(PathBuf),
     #[error("cannot publish verified file {path}: {source}")]
     PublishFile {
+        path: PathBuf,
+        #[source]
+        source: io::Error,
+    },
+    #[error("cannot write event tracking marker {path}: {source}")]
+    WriteEventMarker {
         path: PathBuf,
         #[source]
         source: io::Error,
@@ -328,6 +334,12 @@ impl ImportExecutor {
         hash: &str,
     ) -> Result<(), ImportExecutionError> {
         let session = self.session(session_id)?;
+        write_event_marker(session_id, operation).map_err(|source| {
+            ImportExecutionError::WriteEventMarker {
+                path: event_marker_path(operation),
+                source,
+            }
+        })?;
         self.manifest.complete_import_operation(
             operation.id,
             hash,
@@ -347,7 +359,6 @@ impl ImportExecutor {
                 event_name: Some(operation.event_name.clone()),
             },
         )?;
-        let _ = write_event_marker(session_id, operation);
         if let Some(source_fingerprint) = session.source_fingerprint.as_deref() {
             let _ = self.manifest.cache_verified_source_file(
                 source_fingerprint,
@@ -405,29 +416,36 @@ impl ImportExecutor {
     }
 }
 
-#[derive(Serialize)]
+#[derive(Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
-struct EventMarker<'a> {
+struct EventMarker {
     format_version: u8,
     event_id: String,
-    session_id: &'a str,
-    event_name: &'a str,
+    session_id: String,
+    event_name: String,
     folder_name: String,
 }
 
 fn write_event_marker(session_id: &str, operation: &ImportOperationRecord) -> std::io::Result<()> {
     let Some(folder) = operation.destination_path.parent() else {
-        return Ok(());
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "destination has no parent directory",
+        ));
     };
-    let marker_path = folder.join(".photo-importer-event.json");
-    if marker_path.exists() {
+    let marker_path = event_marker_path(operation);
+    if fs::read(&marker_path)
+        .ok()
+        .and_then(|contents| serde_json::from_slice::<EventMarker>(&contents).ok())
+        .is_some()
+    {
         return Ok(());
     }
     let marker = EventMarker {
         format_version: 1,
         event_id: format!("{session_id}:{}", operation.event_name),
-        session_id,
-        event_name: &operation.event_name,
+        session_id: session_id.to_owned(),
+        event_name: operation.event_name.clone(),
         folder_name: folder
             .file_name()
             .unwrap_or_default()
@@ -435,7 +453,22 @@ fn write_event_marker(session_id: &str, operation: &ImportOperationRecord) -> st
             .into_owned(),
     };
     let contents = serde_json::to_vec_pretty(&marker).map_err(std::io::Error::other)?;
-    std::fs::write(marker_path, contents)
+    let mut temporary = tempfile::NamedTempFile::new_in(folder)?;
+    temporary.write_all(&contents)?;
+    temporary.as_file().sync_all()?;
+    temporary
+        .persist(&marker_path)
+        .map_err(|error| error.error)?;
+    sync_directory_if_supported(folder);
+    Ok(())
+}
+
+fn event_marker_path(operation: &ImportOperationRecord) -> PathBuf {
+    operation
+        .destination_path
+        .parent()
+        .unwrap_or_else(|| Path::new(""))
+        .join(".photo-importer-event.json")
 }
 
 fn copy_to_temporary(

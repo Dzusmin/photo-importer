@@ -37,6 +37,14 @@ export interface BackgroundStatus {
       | "ignoredUntilDisconnect";
     probableMatch: boolean;
   }>;
+  attentionRequired: BackgroundAttention[];
+}
+
+export interface BackgroundAttention {
+  sourceId: string;
+  sourcePath: string;
+  displayName: string;
+  detail: string;
 }
 
 export function acknowledgePendingSource(

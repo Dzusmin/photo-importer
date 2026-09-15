@@ -117,6 +117,19 @@ export interface ImportEventSummary {
   name: string;
   folderPath: string;
   fileCount: number;
+  importedAtUnixMs: number | null;
+}
+
+export type ImportEventSort = "latestImport" | "eventName";
+
+export interface ImportEventAttention {
+  folderPath: string;
+  reason: string;
+}
+
+export interface ImportEventsResult {
+  events: ImportEventSummary[];
+  needsAttention: ImportEventAttention[];
 }
 
 export type SourceWorkflowState =
@@ -417,8 +430,10 @@ export function deleteDisconnectedSourceWorkflows(): Promise<number> {
   return invoke<number>("delete_disconnected_source_workflows");
 }
 
-export function listImportEvents(): Promise<ImportEventSummary[]> {
-  return invoke<ImportEventSummary[]>("list_import_events");
+export function listImportEvents(
+  sort: ImportEventSort = "latestImport",
+): Promise<ImportEventsResult> {
+  return invoke<ImportEventsResult>("list_import_events", { sort });
 }
 
 export function renameImportEvent(

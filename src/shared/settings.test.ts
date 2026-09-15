@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  importPlanSettingsRevision,
   normalizeSettingsError,
   renderFileNamePreview,
   renderFolderPreview,
@@ -38,6 +39,86 @@ function settings(): AppSettings {
 }
 
 describe("settings helpers", () => {
+  it("fingerprints every setting that can affect an import plan", () => {
+    const base = settings();
+    base.local.libraryPath = "C:\\Library";
+    base.portable.cameraProfiles = [
+      {
+        id: "camera-1",
+        name: "Main camera",
+        exifMatchers: [{ make: "Fuji", model: "X-T5", serialNumber: null }],
+        defaultTimeOffsetSeconds: 0,
+      },
+    ];
+    base.local.sourceBindings = [
+      {
+        id: "binding-1",
+        sourceIdentity: {
+          markerUuid: null,
+          platformVolumeId: "volume-1",
+          fallbackFingerprint: "fingerprint-1",
+        },
+        displayName: "Travel card",
+        behavior: "ask",
+        cameraProfileIds: ["camera-1"],
+        lastSeenAtUnixMs: 1,
+      },
+    ];
+    const revision = importPlanSettingsRevision(base);
+    const changedRevisions = [
+      { ...base, local: { ...base.local, libraryPath: "D:\\Photos" } },
+      {
+        ...base,
+        portable: {
+          ...base.portable,
+          import: {
+            ...base.portable.import,
+            defaultOperation: "moveAfterVerification" as const,
+          },
+        },
+      },
+      {
+        ...base,
+        portable: {
+          ...base.portable,
+          import: { ...base.portable.import, eventGapMinutes: 30 },
+        },
+      },
+      {
+        ...base,
+        portable: {
+          ...base.portable,
+          cameraProfiles: [
+            { ...base.portable.cameraProfiles[0], name: "Renamed camera" },
+          ],
+        },
+      },
+      {
+        ...base,
+        local: {
+          ...base.local,
+          sourceBindings: [
+            { ...base.local.sourceBindings[0], displayName: "Renamed card" },
+          ],
+        },
+      },
+    ].map(importPlanSettingsRevision);
+
+    expect(new Set(changedRevisions)).not.toContain(revision);
+
+    const uiOnlyChange = {
+      ...base,
+      local: {
+        ...base.local,
+        uiLanguage: "pl" as const,
+        sourceBindings: [
+          { ...base.local.sourceBindings[0], lastSeenAtUnixMs: 2 },
+        ],
+      },
+    };
+    expect(importPlanSettingsRevision(uiOnlyChange)).toBe(revision);
+  });
+
   it("validates event gap and folder template", () => {
     const value = settings();
     value.portable.import.eventGapMinutes = 0;

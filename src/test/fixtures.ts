@@ -121,6 +121,7 @@ export function backgroundStatusFixture(
     lastError: null,
     events: [],
     pendingSources: [],
+    attentionRequired: [],
     ...patch,
   };
 }

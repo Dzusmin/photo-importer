@@ -68,6 +68,17 @@ impl ImportService {
             .is_ok_and(|runtime| !runtime.running.is_empty() || !runtime.queued.is_empty())
     }
 
+    pub(crate) fn runtime_health(&self) -> Result<(), &'static str> {
+        self.runtime
+            .lock()
+            .map(|_| ())
+            .map_err(|_| "Stan wykonawczy importu jest niedostępny.")
+    }
+
+    pub(crate) fn list_sessions(&self) -> Result<Vec<ImportSession>, ImportCommandError> {
+        self.manifest.list_import_sessions().map_err(manifest_error)
+    }
+
     pub(crate) fn launch(
         &self,
         session_id: String,
@@ -120,6 +131,7 @@ fn spawn_import_worker(
         if should_execute {
             crate::background::announce_import_started(&app);
             let _ = executor.execute_session(&session_id, |session| {
+                crate::operations::emit_import_operation(&app, session);
                 let _ = app.emit("import-progress", session);
             });
         }
@@ -128,6 +140,7 @@ fn spawn_import_worker(
             .is_ok_and(|mut state| state.rollback_after_stop.remove(&session_id));
         if should_rollback {
             let rollback_result = executor.rollback_session(&session_id, |session| {
+                crate::operations::emit_import_operation(&app, session);
                 let _ = app.emit("rollback-progress", session);
             });
             if let Err(error) = rollback_result {
@@ -138,10 +151,12 @@ fn spawn_import_worker(
                 );
             }
             if let Ok(Some(session)) = manifest.get_import_session(&session_id) {
+                crate::operations::emit_import_operation(&app, &session);
                 let _ = app.emit("rollback-progress", &session);
             }
         }
         if let Ok(Some(session)) = manifest.get_import_session(&session_id) {
+            crate::operations::emit_import_operation(&app, &session);
             let _ = app.emit("import-progress", &session);
             if session.status == ImportSessionStatus::FailedRecoverable {
                 let _ = app.emit("import-source-unavailable", &session);
@@ -306,16 +321,18 @@ pub(crate) fn start_import_session(
             "Sesji w tym stanie nie można uruchomić jako importu.",
         ));
     }
-    let discovered = SystemSourceDiscovery.discover();
-    let volume = source_root
-        .as_ref()
-        .and_then(|root| discovered.iter().find(|volume| &volume.mount_path == root))
-        .or_else(|| {
-            discovered
-                .iter()
-                .find(|volume| session_source_matches(&session, volume))
-        });
-    if session.source_identity.is_some() || source_root.is_some() {
+    let has_volume_identity =
+        session.source_identity.is_some() || session.source_fingerprint.is_some();
+    if has_volume_identity {
+        let discovered = SystemSourceDiscovery.discover();
+        let volume = source_root
+            .as_ref()
+            .and_then(|root| discovered.iter().find(|volume| &volume.mount_path == root))
+            .or_else(|| {
+                discovered
+                    .iter()
+                    .find(|volume| session_source_matches(&session, volume))
+            });
         let volume = volume.ok_or_else(|| {
             ImportCommandError::new("sourceUnavailable", "Właściwa karta nie jest podłączona.")
         })?;
@@ -329,26 +346,42 @@ pub(crate) fn start_import_session(
             .manifest
             .validate_and_relink_session_source(&session_id, &volume.mount_path)
             .map_err(manifest_error)?;
+    } else {
+        let source_root = source_root.as_ref().ok_or_else(|| {
+            ImportCommandError::new(
+                "sourceRootRequired",
+                "Import z ręcznego katalogu wymaga jawnego katalogu źródłowego.",
+            )
+        })?;
+        service
+            .manifest
+            .validate_and_relink_session_source(&session_id, source_root)
+            .map_err(manifest_error)?;
     }
     let max_concurrent = settings
         .current_settings()
         .map_err(|error| ImportCommandError::new("settingsUnavailable", error.message()))?
         .local
         .max_concurrent_imports;
-    service.launch(session_id.clone(), app, usize::from(max_concurrent))?;
-    get_session(&service, &session_id)
+    service.launch(session_id.clone(), app.clone(), usize::from(max_concurrent))?;
+    let session = get_session(&service, &session_id)?;
+    crate::operations::emit_import_operation(&app, &session);
+    Ok(session)
 }
 
 #[tauri::command]
 pub(crate) fn pause_import_session(
     session_id: String,
+    app: tauri::AppHandle,
     service: tauri::State<'_, ImportService>,
 ) -> Result<ImportSession, ImportCommandError> {
     service
         .manifest
         .request_session_pause(&session_id)
         .map_err(manifest_error)?;
-    get_session(&service, &session_id)
+    let session = get_session(&service, &session_id)?;
+    crate::operations::emit_import_operation(&app, &session);
+    Ok(session)
 }
 
 #[tauri::command]
@@ -382,6 +415,7 @@ pub(crate) async fn cancel_import_session(
         let id = session_id.clone();
         return tauri::async_runtime::spawn_blocking(move || {
             executor.rollback_session(&id, |session| {
+                crate::operations::emit_import_operation(&app, session);
                 let _ = app.emit("rollback-progress", session);
             })
         })
@@ -410,7 +444,9 @@ pub(crate) async fn cancel_import_session(
             .mark_session_status(&session_id, ImportSessionStatus::Cancelled, None)
             .map_err(manifest_error)?;
     }
-    get_session(&service, &session_id)
+    let session = get_session(&service, &session_id)?;
+    crate::operations::emit_import_operation(&app, &session);
+    Ok(session)
 }
 
 #[tauri::command]
@@ -442,7 +478,8 @@ pub(crate) async fn retry_import_rollback(
 
 pub(crate) fn session_source_matches(session: &ImportSession, volume: &SourceVolume) -> bool {
     let Some(identity) = &session.source_identity else {
-        return session.source_fingerprint.as_deref() == Some(volume.fingerprint.as_str());
+        return session.source_fingerprint.as_deref() == Some(volume.fingerprint.as_str())
+            && session_operations_belong_to_root(session, &volume.mount_path);
     };
     let strong_match = identity.marker_uuid.is_some() && identity.marker_uuid == volume.marker_uuid
         || identity.platform_volume_id.is_some()
@@ -451,6 +488,50 @@ pub(crate) fn session_source_matches(session: &ImportSession, volume: &SourceVol
         strong_match
     } else {
         identity.fallback_fingerprint == volume.fingerprint
+            && session_operations_belong_to_root(session, &volume.mount_path)
+    }
+}
+
+fn session_operations_belong_to_root(session: &ImportSession, root: &std::path::Path) -> bool {
+    !session.operations.is_empty()
+        && session.operations.iter().all(|operation| {
+            operation_belongs_to_root(
+                root,
+                &operation.source_path,
+                &operation.source_relative_path,
+            )
+        })
+}
+
+fn operation_belongs_to_root(
+    root: &std::path::Path,
+    source_path: &std::path::Path,
+    source_relative_path: &std::path::Path,
+) -> bool {
+    root.join(source_relative_path) == source_path
+}
+
+#[cfg(test)]
+mod source_identity_tests {
+    use std::path::Path;
+
+    use super::operation_belongs_to_root;
+
+    #[test]
+    fn fallback_operation_does_not_move_to_a_colliding_mount() {
+        let source_path = Path::new("/media/card-a/DCIM/IMG.JPG");
+        let relative_path = Path::new("DCIM/IMG.JPG");
+
+        assert!(operation_belongs_to_root(
+            Path::new("/media/card-a"),
+            source_path,
+            relative_path
+        ));
+        assert!(!operation_belongs_to_root(
+            Path::new("/media/card-b"),
+            source_path,
+            relative_path
+        ));
     }
 }
 
@@ -458,10 +539,7 @@ pub(crate) fn session_source_matches(session: &ImportSession, volume: &SourceVol
 pub(crate) fn list_import_sessions(
     service: tauri::State<'_, ImportService>,
 ) -> Result<Vec<ImportSession>, ImportCommandError> {
-    service
-        .manifest
-        .list_import_sessions()
-        .map_err(manifest_error)
+    service.list_sessions()
 }
 
 fn get_session(service: &ImportService, id: &str) -> Result<ImportSession, ImportCommandError> {

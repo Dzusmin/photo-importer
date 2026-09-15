@@ -314,6 +314,65 @@ fn persists_session_operations_and_control_requests() {
 }
 
 #[test]
+fn counts_only_completed_files_from_the_selected_event() {
+    use importer_manifest::{
+        ImportSessionOperation, NewImportOperation, NewImportSession, OperationStatus,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();
+    let operation = |item: &str, event: &str, file: &str| NewImportOperation {
+        item_key: item.into(),
+        event_name: event.into(),
+        source_path: directory.path().join("card").join(file),
+        source_relative_path: file.into(),
+        destination_path: directory.path().join("library").join(event).join(file),
+        destination_relative_path: std::path::Path::new(event).join(file),
+        kind: "jpeg".into(),
+        size_bytes: 10,
+    };
+    let session = manifest
+        .create_import_session(&NewImportSession {
+            operation: ImportSessionOperation::Copy,
+            library_root: directory.path().join("library"),
+            source_fingerprint: None,
+            source_identity: None,
+            move_confirmed: false,
+            operations: vec![
+                operation("item-a", "holiday", "a.jpg"),
+                operation("item-b", "holiday", "b.jpg"),
+                operation("item-c", "birthday", "c.jpg"),
+            ],
+        })
+        .unwrap();
+
+    manifest
+        .mark_operation_status(session.operations[0].id, OperationStatus::Completed, None)
+        .unwrap();
+    manifest
+        .mark_operation_status(session.operations[2].id, OperationStatus::Completed, None)
+        .unwrap();
+
+    assert_eq!(
+        manifest
+            .completed_event_file_count(&session.id, "holiday")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        manifest
+            .completed_event_file_count(&session.id, "birthday")
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        manifest
+            .completed_event_file_count(&session.id, "unknown")
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
 fn reopening_database_pauses_an_interrupted_session_and_resets_its_operation() {
     use importer_manifest::{
         ImportSessionOperation, ImportSessionStatus, NewImportOperation, NewImportSession,

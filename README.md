@@ -91,6 +91,12 @@ The workflow in `.github/workflows/ci.yml` runs Rust checks on all three.
 - `crates/importer-settings/` — versioned loading and atomic saving of JSON settings
 - `crates/importer-thumbnails/` — a versioned, disposable JPEG preview cache
 
+The current implementation and its automated tests are the executable source
+of truth for application behavior. This README is the maintained operational
+summary. `docs/automatic-card-import-plan.md` is a design and implementation
+history whose explicit current-behavior notes supersede its older future-tense
+stage descriptions.
+
 The settings repository receives its configuration directory from the
 application layer. On the second and every subsequent save, the previous valid
 `settings.json` is moved to `settings.json.bak`. A corrupt primary file is not
@@ -166,13 +172,25 @@ JPEG opens the original file directly as a full preview; for RAW files, a
 1600 px preview is generated from the image embedded in the container.
 
 The media monitor runs in a separate job even when the main window is hidden.
-Every five seconds it compares volume snapshots, responds only when a known
-card is actually connected, and permits another response only after it has
-been disconnected. The `ask`, `scan automatically`, or `ignore` behavior comes
-from the camera profile assigned to the media fingerprint. An automatic scan
-uses the same queue, deduplication, and progress bar as a manual scan. A panel
-on the home screen shows the automation status, card count, active scans, and
-latest event.
+Every five seconds it compares cross-platform system volume snapshots, responds
+only when a card is actually connected, and permits another response only after
+it has been disconnected. Discovery does not invoke PowerShell. A durable UUID
+marker written on the card is the authoritative identity for unattended
+copying; weaker volume characteristics are not trusted to transfer plans or
+automation between sessions. For a known card, an explicit non-`ask` card
+behavior wins; otherwise the assigned camera-profile behavior and then the
+global default are used. The available behaviors are `ask`, prepare a plan
+automatically, copy automatically (`autoImport`), and `ignore`. A probable match
+based only on weak identity is always reduced to `ask`. Automatic work uses the
+same scan queue and deduplication as manual work.
+
+`autoImport` is deliberately narrower than manual import: it requires the
+durable card UUID, a fresh scan, current plan-affecting settings, `Copy` mode,
+and a ready, non-empty plan without conflicts. A restored plan is rebuilt from
+the fresh scan, retaining only event names, exclusions, and camera assignments
+that still match current items and valid profiles. If a gate fails, the import
+does not start and a durable needs-attention item is shown. The home screen and
+activity center expose current operations and link to the exact job.
 
 The application has a system tray icon with actions to show the window, check
 media immediately, and quit. Closing the window hides it when minimize to tray
@@ -182,8 +200,9 @@ a file. The autostart setting is synchronized with the operating system, and
 startup at login uses the `--background` argument so the window stays hidden
 when minimization is enabled. System notifications report a known card waiting
 for a decision and the result of an automatic scan. On Windows, full
-identification and the notification icon are available in an installed build;
-in development mode, the system may display the name PowerShell.
+identification and the notification icon are available in an installed build.
+Although PowerShell is not used for source discovery, Windows may attribute a
+development-mode notification to PowerShell because of the development host.
 
 The backup engine registers drives under a persistent UUID stored both in the
 local registry and on the medium. This prevents a backup from being written to

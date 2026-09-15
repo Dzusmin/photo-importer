@@ -8,6 +8,7 @@ import {
   startSourceWorkflow,
   ignoreSourceUntilDisconnect,
   type BackgroundStatus,
+  type BackgroundAttention,
 } from "../../shared/background";
 import {
   describeOperationalError,
@@ -17,19 +18,30 @@ import { ErrorNotice } from "../../shared/ErrorNotice";
 import { activeIntlLocale, localize } from "../../i18n";
 
 const ignoreHealthChange = () => undefined;
+const ignoreAttentionChange: (attention: BackgroundAttention[]) => void = () =>
+  undefined;
+const ignoreOpenWorkflow: (sourceId: string) => void = () => undefined;
 
 export function BackgroundMonitor({
   appStatus = "ready",
   onHealthChange = ignoreHealthChange,
+  onAttentionChange = ignoreAttentionChange,
+  onOpenWorkflow = ignoreOpenWorkflow,
   mode = "full",
 }: {
   appStatus?: AppStatus;
   onHealthChange?: (healthy: boolean) => void;
+  onAttentionChange?: (attention: BackgroundAttention[]) => void;
+  onOpenWorkflow?: (sourceId: string) => void;
   mode?: "compact" | "full";
 } = {}) {
   const [status, setStatus] = useState<BackgroundStatus | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [loadError, setLoadError] = useState<unknown>(null);
+
+  useEffect(() => {
+    onAttentionChange(status?.attentionRequired ?? []);
+  }, [onAttentionChange, status?.attentionRequired]);
 
   useEffect(() => {
     if (appStatus === "connecting" || appStatus === "error") {
@@ -75,7 +87,7 @@ export function BackgroundMonitor({
       setLoadError(error);
       onHealthChange(false);
     } finally {
-      window.setTimeout(() => setRefreshing(false), 500);
+      setRefreshing(false);
     }
   }
 
@@ -152,18 +164,39 @@ export function BackgroundMonitor({
             : localize("Check now", "Sprawdź teraz")}
         </button>
       </div>
-      {mode === "full" && loadError !== null && (
+      {loadError !== null && (
         <ErrorNotice
           error={describeOperationalError(loadError, "read")}
           onRetry={() => void refresh()}
         />
       )}
-      {mode === "full" && status?.lastError && (
+      {status?.lastError && (
         <ErrorNotice
           error={describeOperationalError(status.lastError, "read")}
           onRetry={() => void refresh()}
         />
       )}
+      {status?.attentionRequired.map((attention) => (
+        <div
+          className="background-monitor__attention"
+          role="alert"
+          key={attention.sourceId}
+        >
+          <span aria-hidden="true">!</span>
+          <div>
+            <strong>{localize("Needs attention", "Wymaga uwagi")}</strong>
+            <p>{attention.displayName}</p>
+            <small>{attention.detail}</small>
+          </div>
+          <button
+            type="button"
+            className="danger-quiet"
+            onClick={() => onOpenWorkflow(attention.sourceId)}
+          >
+            {localize("Open workflow", "Otwórz workflow")}
+          </button>
+        </div>
+      ))}
       {mode === "full" &&
         status?.pendingSources.map((source) => (
           <div className="background-monitor__event" key={source.fingerprint}>

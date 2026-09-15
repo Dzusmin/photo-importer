@@ -25,6 +25,7 @@ import {
   type CameraProfile,
   type SettingsCommandError,
 } from "../../shared/settings";
+import { useSettingsStore } from "../../shared/SettingsStore";
 
 type Notice =
   | {
@@ -45,14 +46,23 @@ type Notice =
       translationKey?: never;
     };
 
-export function SettingsPanel() {
+export function SettingsPanel({
+  onDirtyChange,
+}: {
+  onDirtyChange?: (dirty: boolean) => void;
+}) {
   const { t, i18n } = useTranslation();
+  const settingsStore = useSettingsStore();
   const [settings, setSettings] = useState<AppSettings | null>(null);
   const [savedSnapshot, setSavedSnapshot] = useState("");
   const [backupAvailable, setBackupAvailable] = useState(false);
   const [loadError, setLoadError] = useState<SettingsCommandError | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [busy, setBusy] = useState(false);
+  const [libraryChange, setLibraryChange] = useState<{
+    previousPath: string;
+    nextPath: string;
+  } | null>(null);
 
   const validationErrors = useMemo(
     () => (settings ? validateSettings(settings) : []),
@@ -61,14 +71,32 @@ export function SettingsPanel() {
   const dirty = settings !== null && JSON.stringify(settings) !== savedSnapshot;
 
   useEffect(() => {
-    void reload();
-  }, []);
+    onDirtyChange?.(dirty);
+  }, [dirty, onDirtyChange]);
+
+  useEffect(() => {
+    if (!settingsStore) void reload();
+  }, [settingsStore]);
+
+  useEffect(() => {
+    if (!settingsStore?.response) return;
+    const locallyDirty =
+      settings !== null && JSON.stringify(settings) !== savedSnapshot;
+    if (!locallyDirty) {
+      acceptResponse(
+        settingsStore.response.settings,
+        settingsStore.response.backupAvailable,
+      );
+    }
+  }, [settingsStore?.response]);
 
   async function reload() {
     setBusy(true);
     setLoadError(null);
     try {
-      const response = await loadSettings();
+      const response = settingsStore
+        ? await settingsStore.reload()
+        : await loadSettings();
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "info",
@@ -97,15 +125,19 @@ export function SettingsPanel() {
 
   async function persist() {
     if (!settings || validationErrors.length > 0) return;
+    const base = JSON.parse(savedSnapshot) as AppSettings;
     if (
-      JSON.stringify(settings).includes('"autoImport"') &&
-      !savedSnapshot.includes('"autoImport"') &&
+      enablesNewAutoImportScope(base, settings) &&
       !window.confirm(t("settings.sourceBehavior.autoImportConfirmation"))
     )
       return;
     setBusy(true);
     try {
-      const response = await saveSettings(settings);
+      const response = settingsStore
+        ? await settingsStore.updateSettings((current) =>
+            mergeSettingsChanges(base, settings, current),
+          )
+        : await saveSettings(settings);
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
@@ -119,9 +151,12 @@ export function SettingsPanel() {
   }
 
   async function restoreBackup() {
+    if (!confirmBackupRestore()) return;
     setBusy(true);
     try {
-      const response = await restoreSettingsBackup();
+      const response = settingsStore
+        ? await settingsStore.replaceSettings(restoreSettingsBackup)
+        : await restoreSettingsBackup();
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
@@ -141,12 +176,24 @@ export function SettingsPanel() {
       multiple: false,
       title: t("settings.library.dialogTitle"),
     });
-    if (path) {
-      setSettings({
-        ...settings,
-        local: { ...settings.local, libraryPath: path },
+    if (!path || path === settings.local.libraryPath) return;
+    if (settings.local.libraryPath) {
+      setLibraryChange({
+        previousPath: settings.local.libraryPath,
+        nextPath: path,
       });
+      return;
     }
+    applyLibraryPath(path);
+  }
+
+  function applyLibraryPath(path: string | null) {
+    if (!settings) return;
+    setSettings({
+      ...settings,
+      local: { ...settings.local, libraryPath: path },
+    });
+    setLibraryChange(null);
   }
 
   async function exportConfiguration() {
@@ -171,15 +218,21 @@ export function SettingsPanel() {
   }
 
   async function importConfiguration() {
+    if (dirty && !confirmDraftDiscard()) return;
     const path = await open({
       multiple: false,
       title: t("settings.transfer.importDialog"),
       filters: [{ name: "JSON", extensions: ["json"] }],
     });
     if (!path) return;
+    if (!window.confirm(t("settings.transfer.confirmImport"))) return;
     setBusy(true);
     try {
-      const response = await importPortableSettings(path);
+      const response = settingsStore
+        ? await settingsStore.replaceSettings(() =>
+            importPortableSettings(path),
+          )
+        : await importPortableSettings(path);
       acceptResponse(response.settings, response.backupAvailable);
       setNotice({
         kind: "success",
@@ -205,6 +258,15 @@ export function SettingsPanel() {
     } finally {
       setBusy(false);
     }
+  }
+
+  function confirmDraftDiscard() {
+    return window.confirm(t("settings.transfer.confirmDraftDiscard"));
+  }
+
+  function confirmBackupRestore() {
+    if (dirty && !confirmDraftDiscard()) return false;
+    return window.confirm(t("settings.transfer.confirmRestore"));
   }
 
   if (!settings) {
@@ -309,12 +371,11 @@ export function SettingsPanel() {
               <button
                 type="button"
                 className="ghost"
-                onClick={() =>
-                  setSettings({
-                    ...settings,
-                    local: { ...settings.local, libraryPath: null },
-                  })
-                }
+                onClick={() => {
+                  if (window.confirm(t("settings.library.confirmClear"))) {
+                    applyLibraryPath(null);
+                  }
+                }}
               >
                 {t("common.clear")}
               </button>
@@ -322,6 +383,66 @@ export function SettingsPanel() {
           </div>
         </Field>
       </SettingsSection>
+
+      {libraryChange && (
+        <div
+          className="library-change-overlay"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="library-change-title"
+        >
+          <div className="library-change-dialog">
+            <p className="section-label">
+              {t("settings.library.changeEyebrow")}
+            </p>
+            <h3 id="library-change-title">
+              {t("settings.library.changeTitle")}
+            </h3>
+            <p>{t("settings.library.changeImpact")}</p>
+            <dl>
+              <div>
+                <dt>{t("settings.library.previousPath")}</dt>
+                <dd>
+                  <code>{libraryChange.previousPath}</code>
+                </dd>
+              </div>
+              <div>
+                <dt>{t("settings.library.nextPath")}</dt>
+                <dd>
+                  <code>{libraryChange.nextPath}</code>
+                </dd>
+              </div>
+            </dl>
+            <div className="library-change-options">
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => applyLibraryPath(libraryChange.nextPath)}
+              >
+                <strong>{t("settings.library.useNew")}</strong>
+                <span>{t("settings.library.useNewDescription")}</span>
+              </button>
+              <button
+                type="button"
+                className="secondary"
+                onClick={() => applyLibraryPath(libraryChange.nextPath)}
+              >
+                <strong>{t("settings.library.useMoved")}</strong>
+                <span>{t("settings.library.useMovedDescription")}</span>
+              </button>
+            </div>
+            <div className="button-row library-change-actions">
+              <button
+                type="button"
+                className="ghost"
+                onClick={() => setLibraryChange(null)}
+              >
+                {t("common.cancel")}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       <SettingsSection
         title={t("settings.import.title")}
@@ -566,7 +687,6 @@ export function SettingsPanel() {
                 ...settings,
                 local: { ...settings.local, uiLanguage },
               });
-              void setAppLanguage(uiLanguage);
             }}
           >
             <option value="en">English</option>
@@ -724,6 +844,93 @@ export function SettingsPanel() {
       </footer>
     </section>
   );
+}
+
+export function enablesNewAutoImportScope(
+  previous: AppSettings,
+  next: AppSettings,
+): boolean {
+  if (
+    previous.portable.import.defaultSourceBehavior !== "autoImport" &&
+    next.portable.import.defaultSourceBehavior === "autoImport"
+  ) {
+    return true;
+  }
+
+  const previousCameraBehaviors = new Map(
+    previous.portable.cameraProfiles.map((profile) => [
+      profile.id,
+      profile.sourceBehavior,
+    ]),
+  );
+  if (
+    next.portable.cameraProfiles.some(
+      (profile) =>
+        profile.sourceBehavior === "autoImport" &&
+        previousCameraBehaviors.get(profile.id) !== "autoImport",
+    )
+  ) {
+    return true;
+  }
+
+  const previousCardBehaviors = new Map(
+    previous.local.sourceBindings.map((binding) => [
+      binding.id,
+      binding.behavior,
+    ]),
+  );
+  return next.local.sourceBindings.some(
+    (binding) =>
+      binding.behavior === "autoImport" &&
+      previousCardBehaviors.get(binding.id) !== "autoImport",
+  );
+}
+
+function mergeSettingsChanges(
+  base: AppSettings,
+  draft: AppSettings,
+  current: AppSettings,
+): AppSettings {
+  return {
+    ...current,
+    schemaVersion:
+      base.schemaVersion === draft.schemaVersion
+        ? current.schemaVersion
+        : draft.schemaVersion,
+    portable: {
+      ...current.portable,
+      import: mergeChangedFields(
+        base.portable.import,
+        draft.portable.import,
+        current.portable.import,
+      ),
+      naming: mergeChangedFields(
+        base.portable.naming,
+        draft.portable.naming,
+        current.portable.naming,
+      ),
+      cameraProfiles:
+        JSON.stringify(base.portable.cameraProfiles) ===
+        JSON.stringify(draft.portable.cameraProfiles)
+          ? current.portable.cameraProfiles
+          : draft.portable.cameraProfiles,
+    },
+    local: mergeChangedFields(base.local, draft.local, current.local),
+  };
+}
+
+function mergeChangedFields<T extends object>(
+  base: T,
+  draft: T,
+  current: T,
+): T {
+  const merged = { ...current };
+  for (const key of Object.keys(draft) as Array<keyof T>) {
+    if (JSON.stringify(base[key]) !== JSON.stringify(draft[key])) {
+      merged[key] = draft[key];
+    }
+  }
+  return merged;
 }
 
 function AppearanceSettings() {

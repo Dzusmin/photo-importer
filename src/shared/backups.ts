@@ -270,6 +270,7 @@ const SPECIFIC_BACKUP_ERROR_CODES = new Set([
   "backupSourceChanged",
   "backupVerificationFailed",
   "backupIoFailed",
+  "backupTargetBusy",
   "openBackupDirectoryFailed",
 ]);
 
