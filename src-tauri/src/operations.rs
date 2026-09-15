@@ -407,6 +407,12 @@ mod tests {
     use importer_manifest::{ImportSessionOperation, SessionSourceIdentity};
     use std::path::PathBuf;
 
+    type EmptyOperationSources = (
+        Result<Vec<MediaScanJob>, OperationDiagnostic>,
+        Result<Vec<BackupPlanningJob>, OperationDiagnostic>,
+        Result<Vec<BackupJob>, OperationDiagnostic>,
+    );
+
     fn import_session(status: ImportSessionStatus, updated_at_unix_ms: u64) -> ImportSession {
         ImportSession {
             id: format!("session-{updated_at_unix_ms}"),
@@ -432,11 +438,7 @@ mod tests {
         }
     }
 
-    fn empty_sources() -> (
-        Result<Vec<MediaScanJob>, OperationDiagnostic>,
-        Result<Vec<BackupPlanningJob>, OperationDiagnostic>,
-        Result<Vec<BackupJob>, OperationDiagnostic>,
-    ) {
+    fn empty_sources() -> EmptyOperationSources {
         (Ok(Vec::new()), Ok(Vec::new()), Ok(Vec::new()))
     }
 
