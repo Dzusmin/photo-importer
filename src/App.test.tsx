@@ -1,8 +1,10 @@
 import { act, render, screen, waitFor } from "@testing-library/react";
+import { mockIPC } from "@tauri-apps/api/mocks";
 import userEvent from "@testing-library/user-event";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import type { OperationSummary, OperationsSnapshot } from "./shared/operations";
+import { settingsResponseFixture } from "./test/fixtures";
 
 const eventBus = vi.hoisted(
   () => new Map<string, Set<(event: { payload: unknown }) => void>>(),
@@ -148,10 +150,12 @@ vi.mock("./features/plans/PlansPanel", () => ({
 vi.mock("./features/settings/SettingsPanel", () => ({
   SettingsPanel: ({
     onDirtyChange,
+    focusSection,
   }: {
     onDirtyChange?: (dirty: boolean) => void;
+    focusSection?: "library" | null;
   }) => (
-    <div>
+    <div data-focus-section={focusSection ?? undefined}>
       settings-test
       <input aria-label="settings-draft-test" defaultValue="" />
       <button
@@ -206,6 +210,47 @@ describe("App", () => {
     listImportEvents.mockResolvedValue({ events: [], needsAttention: [] });
     listOperations.mockReset();
     listOperations.mockResolvedValue({ operations: [], diagnostics: [] });
+    mockIPC((command) => {
+      if (command === "load_settings") {
+        const response = settingsResponseFixture();
+        response.settings.local.libraryPath = "C:\\Photos";
+        return response;
+      }
+    });
+  });
+
+  it("treats a fresh profile as setup and opens the library settings directly", async () => {
+    getSystemStatus.mockResolvedValue({
+      productName: "Photo Importer",
+      appVersion: "0.1.0",
+      operatingSystem: "windows",
+      architecture: "x86_64",
+      backendStatus: "ready",
+      importEngineStatus: "ready",
+      importEngineLastError: null,
+    });
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+    });
+    const user = userEvent.setup();
+    render(<App />);
+
+    expect(
+      await screen.findByRole("heading", { name: "Choose your photo library" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByTestId("scanner-test")).not.toBeInTheDocument();
+    expect(screen.queryByText("Import history needs attention")).toBeNull();
+    expect(screen.getAllByText("Ready").length).toBeGreaterThan(0);
+    expect(listImportEvents).not.toHaveBeenCalled();
+
+    await user.click(
+      screen.getByRole("button", { name: "Choose photo library" }),
+    );
+
+    expect(screen.getByText("settings-test")).toHaveAttribute(
+      "data-focus-section",
+      "library",
+    );
   });
 
   it("reports a ready backend and navigates between main views", async () => {

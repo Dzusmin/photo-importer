@@ -15,7 +15,7 @@
         "title": "Photo Importer",
         "width": 980,
         "height": 680,
-        "minWidth": 760,
+        "minWidth": 420,
         "minHeight": 540,
         "center": true
       }

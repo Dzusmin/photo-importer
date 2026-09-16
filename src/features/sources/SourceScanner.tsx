@@ -76,6 +76,9 @@ type ScanSource =
       sourceId: string;
       displayName: string;
     };
+
+type ImportViewState =
+  "idle" | "scanning" | "review" | "planning" | "importing";
 import { requestThumbnail } from "../../shared/thumbnailManager";
 import {
   describeOperationalError,
@@ -87,6 +90,11 @@ import {
   operationRouteKey,
   type OperationRoute,
 } from "../../shared/operations";
+import {
+  normalizeImportOperationError,
+  type ImportOperationError,
+  type ImportSourceKind,
+} from "../../shared/importErrors";
 
 const ignoreHealthChange = () => undefined;
 
@@ -162,7 +170,11 @@ export function SourceScanner({
     Set<string>
   >(new Set());
   const [importActionPending, setImportActionPending] = useState(false);
-  const [completedImportNotice, setCompletedImportNotice] = useState(false);
+  const [importErrorsBySessionId, setImportErrorsBySessionId] = useState<
+    Record<string, ImportOperationError>
+  >({});
+  const [completedImportNoticeSessionId, setCompletedImportNoticeSessionId] =
+    useState<string | null>(null);
   const [writeSourceMarker, setWriteSourceMarker] = useState(true);
   const [markerWritePending, setMarkerWritePending] = useState(false);
   const [pendingWorkflows, setPendingWorkflows] = useState<
@@ -173,6 +185,7 @@ export function SourceScanner({
   const displayedWorkflowId = useRef<string | null>(null);
   const scanSource = useRef<ScanSource | null>(null);
   const displayedImportSessionId = useRef<string | null>(null);
+  const importSessionsByIdRef = useRef<Record<string, ImportSession>>({});
   const metadataSaveQueue = useRef<Promise<void>>(Promise.resolve());
   const workflowSaveQueues = useRef<Map<string, Promise<void>>>(new Map());
   const metadataLoadGeneration = useRef(0);
@@ -211,6 +224,7 @@ export function SourceScanner({
       ),
     [importSessionsById],
   );
+  importSessionsByIdRef.current = importSessionsById;
   const scannedSource = scanResult
     ? sources.find((source) => source.mountPath === scanResult.scan.root)
     : undefined;
@@ -230,6 +244,45 @@ export function SourceScanner({
   const journeySession = selectedImportSession ?? importSessions[0] ?? null;
   const journeyStep = journeySession ? 3 : importPlan ? 2 : scanResult ? 1 : 0;
   const journeyFinished = journeySession?.status === "completed";
+  const importViewState: ImportViewState =
+    importSessions.length > 0
+      ? "importing"
+      : activeScanJobs.length > 0
+        ? "scanning"
+        : planning || importPlan
+          ? "planning"
+          : scanResult
+            ? "review"
+            : "idle";
+  const journeySource = journeySession
+    ? sources
+        .filter((source) => source.likelyCameraSource)
+        .find((source) => sourceMatchesSession(source, journeySession))
+    : undefined;
+  const activeSourceContext: ScanSource | null =
+    scanSource.current ??
+    (scannedSource ? volumeScanSource(scannedSource) : null) ??
+    (journeySource ? volumeScanSource(journeySource) : null);
+  const sourceHeroTitle =
+    importViewState !== "idle" && activeSourceContext?.kind === "directory"
+      ? l(
+          `Folder selected: ${activeSourceContext.displayName}`,
+          `Wybrany katalog: ${activeSourceContext.displayName}`,
+        )
+      : importViewState !== "idle" && activeSourceContext?.kind === "volume"
+        ? l(
+            `Memory card: ${activeSourceContext.displayName}`,
+            `Karta pamięci: ${activeSourceContext.displayName}`,
+          )
+        : importViewState !== "idle"
+          ? l("Source workflow in progress.", "Trwa praca ze źródłem.")
+          : !discoveryComplete
+            ? appStatus === "error"
+              ? l("Sources are unavailable.", "Źródła są niedostępne.")
+              : l("Checking available sources…", "Sprawdzam dostępne źródła…")
+            : cameraSources.length > 0
+              ? l("Camera media detected.", "Wykryto nośnik aparatu.")
+              : l("Waiting for a memory card.", "Czekam na kartę pamięci.");
 
   useEffect(() => {
     if (!openOperationRoute) {
@@ -251,10 +304,36 @@ export function SourceScanner({
   }, [importSessionsById, openOperationRoute, scanJobsById]);
 
   const recordImportSession = useCallback((session: ImportSession) => {
+    if (
+      ["queued", "running", "paused", "completed", "cancelled"].includes(
+        session.status,
+      )
+    ) {
+      setImportErrorsBySessionId((current) => {
+        if (!current[session.id]) return current;
+        const next = { ...current };
+        delete next[session.id];
+        return next;
+      });
+    }
     if (session.status !== "completed") {
+      setCompletedImportNoticeSessionId((current) =>
+        current && current !== session.id ? null : current,
+      );
       upsertImportSession(setImportSessionsById, session);
       return;
     }
+
+    const completesDisplayedSession =
+      displayedImportSessionId.current === session.id;
+    const hasDifferentVisibleSession = Object.values(
+      importSessionsByIdRef.current,
+    ).some((candidate) => candidate.id !== session.id);
+    const hasDifferentDisplayedWorkflow =
+      !completesDisplayedSession &&
+      (displayedImportSessionId.current !== null ||
+        displayedWorkflowId.current !== null ||
+        displayedScanRoot.current !== null);
 
     setImportSessionsById((current) => {
       const next = { ...current };
@@ -265,8 +344,10 @@ export function SourceScanner({
       current === session.id ? null : current,
     );
 
-    setCompletedImportNotice(true);
-    if (displayedImportSessionId.current !== session.id) return;
+    if (!hasDifferentVisibleSession && !hasDifferentDisplayedWorkflow) {
+      setCompletedImportNoticeSessionId(session.id);
+    }
+    if (!completesDisplayedSession) return;
 
     setScanResult(null);
     setImportPlan(null);
@@ -1519,7 +1600,10 @@ export function SourceScanner({
         ),
       );
     if (!confirmMove) return;
+    setCompletedImportNoticeSessionId(null);
     setImportActionPending(true);
+    let createdSession: ImportSession | null = null;
+    let importStarted = false;
     try {
       const session = await createImportSession(
         selectedPlan,
@@ -1527,6 +1611,7 @@ export function SourceScanner({
         expectedIdentity,
         confirmMove,
       );
+      createdSession = session;
       setSelectedImportSessionId(session.id);
       displayedImportSessionId.current = session.id;
       recordImportSession(session);
@@ -1535,6 +1620,7 @@ export function SourceScanner({
         directoryRoot,
       );
       recordImportSession(startedSession);
+      importStarted = true;
       if (workflow) await deletePendingSourceWorkflow(workflow.sourceId);
       setPendingWorkflows((current) =>
         current.filter(
@@ -1543,7 +1629,31 @@ export function SourceScanner({
       );
       setMessage(l("Import started.", "Import został rozpoczęty."));
     } catch (error) {
-      setMessage(normalizeSettingsError(error).message);
+      if (importStarted) {
+        setMessage(normalizeSettingsError(error).message);
+        return;
+      }
+      const normalized = normalizeImportOperationError(
+        error,
+        selectedSource?.kind ?? "unknown",
+      );
+      if (createdSession) {
+        const failedSession = createdSession;
+        setImportErrorsBySessionId((current) => ({
+          ...current,
+          [failedSession.id]: normalized,
+        }));
+        recordImportSession({
+          ...failedSession,
+          status: normalized.recoverable ? "failedRecoverable" : "failed",
+          lastError: normalized.technicalDetails,
+        });
+        setMessage(null);
+      } else {
+        setMessage(
+          `${normalized.cause} ${normalized.nextStep} ${normalized.retrySafety}`,
+        );
+      }
     } finally {
       setImportActionPending(false);
     }
@@ -1663,12 +1773,23 @@ export function SourceScanner({
             )?.mountPath ?? null)
           : (scanResult?.scan.root ?? null);
       if (action === "resume" && !observedSourceRoot) {
-        setMessage(
-          l(
-            "The original card observation is unavailable. Reconnect the identified card instead of a similar unmarked card.",
-            "Pierwotna obserwacja karty jest niedostępna. Podłącz zidentyfikowaną kartę zamiast podobnej nieoznaczonej karty.",
-          ),
+        const normalized = normalizeImportOperationError(
+          {
+            code: "sourceUnavailable",
+            message: "The saved source is not currently observable.",
+          },
+          importSourceKind(importSession),
         );
+        setImportErrorsBySessionId((current) => ({
+          ...current,
+          [importSession.id]: normalized,
+        }));
+        recordImportSession({
+          ...importSession,
+          status: "failedRecoverable",
+          lastError: normalized.technicalDetails,
+        });
+        setMessage(null);
         return;
       }
       const session =
@@ -1678,8 +1799,40 @@ export function SourceScanner({
             ? await pauseImportSession(importSession.id)
             : await cancelImportSession(importSession.id, cancelMode);
       recordImportSession(session);
+      if (action === "resume" && session.status === "running") {
+        const workflow = pendingWorkflows.find(
+          (candidate) => candidate.sourceRoot === observedSourceRoot,
+        );
+        if (workflow) {
+          try {
+            await deletePendingSourceWorkflow(workflow.sourceId);
+            setPendingWorkflows((current) =>
+              current.filter(
+                (candidate) => candidate.sourceId !== workflow.sourceId,
+              ),
+            );
+          } catch (error) {
+            setMessage(normalizeSettingsError(error).message);
+          }
+        }
+      }
     } catch (error) {
-      setMessage(normalizeSettingsError(error).message);
+      const normalized = normalizeImportOperationError(
+        error,
+        importSourceKind(importSession),
+      );
+      setImportErrorsBySessionId((current) => ({
+        ...current,
+        [importSession.id]: normalized,
+      }));
+      if (action === "resume") {
+        recordImportSession({
+          ...importSession,
+          status: normalized.recoverable ? "failedRecoverable" : "failed",
+          lastError: normalized.technicalDetails,
+        });
+      }
+      setMessage(null);
     } finally {
       setPendingImportSessionIds((current) => {
         const next = new Set(current);
@@ -1702,7 +1855,14 @@ export function SourceScanner({
         ),
       );
     } catch (error) {
-      setMessage(normalizeSettingsError(error).message);
+      setImportErrorsBySessionId((current) => ({
+        ...current,
+        [importSession.id]: normalizeImportOperationError(
+          error,
+          importSourceKind(importSession),
+        ),
+      }));
+      setMessage(null);
     } finally {
       setPendingImportSessionIds((current) => {
         const next = new Set(current);
@@ -1717,7 +1877,7 @@ export function SourceScanner({
       {(journeyStep > 0 || journeyFinished) && (
         <ImportJourney currentStep={journeyStep} finished={journeyFinished} />
       )}
-      {completedImportNotice && (
+      {completedImportNoticeSessionId && (
         <section className="import-complete-notice" role="status">
           <span>{l("Import completed.", "Import został zakończony.")}</span>
           <div>
@@ -1729,30 +1889,181 @@ export function SourceScanner({
             <button
               type="button"
               className="ghost"
-              onClick={() => setCompletedImportNotice(false)}
+              onClick={() => setCompletedImportNoticeSessionId(null)}
             >
               {l("Dismiss", "Zamknij")}
             </button>
           </div>
         </section>
       )}
-      <section className="source-hero">
+      {activeScanJobs.length > 0 && (
+        <section
+          className="scan-jobs"
+          aria-label={l("Active scans", "Aktywne skany")}
+        >
+          {activeScanJobs.map((scanJob) => (
+            <div key={scanJob.id}>
+              <ScanProgressPanel
+                job={scanJob}
+                focused={
+                  openOperationRoute?.kind === "scan" &&
+                  openOperationRoute.scanId === scanJob.id
+                }
+                onCancel={() => void cancelScan(scanJob)}
+              />
+              {streamedScans[scanJob.id]?.path === scanJob.path &&
+                streamedScans[scanJob.id].items.length > 0 && (
+                  <StreamingScanPreview
+                    items={streamedScans[scanJob.id].items}
+                  />
+                )}
+            </div>
+          ))}
+        </section>
+      )}
+
+      {routedScanJob && routedScanJob.status !== "running" && (
+        <section
+          className="scan-jobs"
+          aria-label={l("Selected scan", "Wybrany skan")}
+        >
+          <ScanProgressPanel
+            job={routedScanJob}
+            focused
+            onCancel={() => undefined}
+          />
+        </section>
+      )}
+
+      {importSessions.length > 0 && (
+        <section
+          className="import-sessions"
+          aria-label={l("Import sessions", "Sesje importu")}
+        >
+          {importSessions.map((session) => (
+            <ImportSessionProgress
+              key={session.id}
+              session={session}
+              focused={
+                openOperationRoute?.kind === "import" &&
+                openOperationRoute.importSessionId === session.id
+              }
+              actionPending={pendingImportSessionIds.has(session.id)}
+              actionError={importErrorsBySessionId[session.id] ?? null}
+              onControl={(action) => void controlImport(session, action)}
+              onRetryRollback={() => void retryRollback(session)}
+            />
+          ))}
+        </section>
+      )}
+
+      {scanResult && (
+        <>
+          {profileDrafts && profileDrafts.length > 0 && settings && (
+            <CameraProfileConfirmation
+              drafts={profileDrafts}
+              profiles={settings.portable.cameraProfiles}
+              onChange={setProfileDrafts}
+              onConfirm={() => void confirmDetectedProfiles()}
+              writeMarker={writeSourceMarker}
+              markerDisabled={
+                sources.find(
+                  (source) => source.mountPath === scanResult.scan.root,
+                )?.readOnly ?? false
+              }
+              onWriteMarkerChange={setWriteSourceMarker}
+            />
+          )}
+          <ScanResults
+            result={scanResult}
+            selectedKeys={selectedKeys}
+            onSelectionChange={setSelectedKeys}
+            correctionValue={correctionValue}
+            onCorrectionValueChange={setCorrectionValue}
+            correctionUnit={correctionUnit}
+            onCorrectionUnitChange={setCorrectionUnit}
+            onApplyCorrection={() => void applyCorrection()}
+            busy={
+              scanningPath !== null || activeScanPaths.has(scanResult.scan.root)
+            }
+            filter={resultFilter}
+            onFilterChange={setResultFilter}
+            ratingFilter={ratingFilter}
+            onRatingFilterChange={setRatingFilter}
+            rejectionFilter={rejectionFilter}
+            onRejectionFilterChange={setRejectionFilter}
+            userMetadata={userMetadata}
+            onUserMetadataChange={updateUserMetadata}
+            excludedImportKeys={excludedImportKeys}
+            onExcludedImportKeysChange={(keys) => {
+              setExcludedImportKeys(keys);
+              invalidatePlan({
+                eventNames,
+                excludedItemKeys: [...keys],
+                itemProfileAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
+            }}
+            eventNames={eventNames}
+            onEventNameChange={(index, name) => {
+              const nextEventNames = { ...eventNames, [index]: name };
+              setEventNames(nextEventNames);
+              invalidatePlan({
+                eventNames: nextEventNames,
+                excludedItemKeys: [...excludedImportKeys],
+                itemProfileAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
+            }}
+            expandedEventIndexes={expandedEventIndexes}
+            onExpandedEventIndexesChange={updateExpandedEvents}
+            importPlan={importPlan}
+            planning={planning}
+            onPrepareImportPlan={() => void prepareImportPlan(false)}
+            onDeleteImportPlan={() => void deleteImportPlan()}
+            importSession={selectedImportSession}
+            hasActiveImportSession={importSessions.length > 0}
+            importActionPending={importActionPending}
+            onBeginImport={() => void beginImport()}
+            importOperation={
+              settings?.portable.import.defaultOperation ?? "copy"
+            }
+            cameraProfiles={settings?.portable.cameraProfiles ?? []}
+            itemProfileAssignments={itemProfileAssignments}
+            onItemProfileAssignment={(key, profileId) => {
+              const nextAssignments = {
+                ...itemProfileAssignments,
+                [key]: profileId,
+              };
+              setItemProfileAssignments(nextAssignments);
+              invalidatePlan({
+                eventNames,
+                excludedItemKeys: [...excludedImportKeys],
+                itemProfileAssignments: nextAssignments,
+                expandedEventIndexes: [...expandedEventIndexes],
+              });
+            }}
+          />
+        </>
+      )}
+
+      <section
+        className={`source-hero${importViewState === "idle" ? "" : " source-hero--compact"}`}
+        data-import-view-state={importViewState}
+      >
         <div>
           <p className="section-label">{l("MEDIA SOURCES", "ŹRÓDŁA MEDIÓW")}</p>
-          <h2>
-            {!discoveryComplete
-              ? appStatus === "error"
-                ? l("Sources are unavailable.", "Źródła są niedostępne.")
-                : l("Checking available sources…", "Sprawdzam dostępne źródła…")
-              : cameraSources.length > 0
-                ? l("Camera media detected.", "Wykryto nośnik aparatu.")
-                : l("Waiting for a memory card.", "Czekam na kartę pamięci.")}
-          </h2>
-          <p>
-            {l(
-              "The list refreshes every 5 seconds. You can also scan any folder or mounted network share.",
-              "Lista odświeża się co 5 sekund. Możesz też przeskanować dowolny katalog lub zamontowany udział sieciowy.",
-            )}
+          <h2>{sourceHeroTitle}</h2>
+          <p className="source-hero__description">
+            {importViewState === "idle"
+              ? l(
+                  "The list refreshes every 5 seconds. You can also scan any folder or mounted network share.",
+                  "Lista odświeża się co 5 sekund. Możesz też przeskanować dowolny katalog lub zamontowany udział sieciowy.",
+                )
+              : l(
+                  "The active work stays above the source monitor.",
+                  "Aktywna praca pozostaje nad monitorem źródeł.",
+                )}
           </p>
           <button
             type="button"
@@ -1764,7 +2075,12 @@ export function SourceScanner({
               appStatus === "error"
             }
           >
-            {l("Choose folder manually", "Wybierz katalog ręcznie")}
+            {importViewState !== "idle" &&
+            activeSourceContext?.kind === "directory"
+              ? l("Change folder", "Zmień katalog")
+              : importViewState !== "idle"
+                ? l("Choose another folder", "Wybierz inny katalog")
+                : l("Choose folder manually", "Wybierz katalog ręcznie")}
           </button>
           {message && (
             <p className="scan-message" role="status">
@@ -1811,45 +2127,6 @@ export function SourceScanner({
           error={describeOperationalError(discoveryError, "read")}
           onRetry={() => void refreshSources()}
         />
-      )}
-
-      {activeScanJobs.length > 0 && (
-        <section
-          className="scan-jobs"
-          aria-label={l("Active scans", "Aktywne skany")}
-        >
-          {activeScanJobs.map((scanJob) => (
-            <div key={scanJob.id}>
-              <ScanProgressPanel
-                job={scanJob}
-                focused={
-                  openOperationRoute?.kind === "scan" &&
-                  openOperationRoute.scanId === scanJob.id
-                }
-                onCancel={() => void cancelScan(scanJob)}
-              />
-              {streamedScans[scanJob.id]?.path === scanJob.path &&
-                streamedScans[scanJob.id].items.length > 0 && (
-                  <StreamingScanPreview
-                    items={streamedScans[scanJob.id].items}
-                  />
-                )}
-            </div>
-          ))}
-        </section>
-      )}
-
-      {routedScanJob && routedScanJob.status !== "running" && (
-        <section
-          className="scan-jobs"
-          aria-label={l("Selected scan", "Wybrany skan")}
-        >
-          <ScanProgressPanel
-            job={routedScanJob}
-            focused
-            onCancel={() => undefined}
-          />
-        </section>
       )}
 
       {cameraSources.length > 0 && (
@@ -1959,116 +2236,6 @@ export function SourceScanner({
             );
           })}
         </section>
-      )}
-
-      {importSessions.length > 0 && (
-        <section
-          className="import-sessions"
-          aria-label={l("Import sessions", "Sesje importu")}
-        >
-          {importSessions.map((session) => (
-            <ImportSessionProgress
-              key={session.id}
-              session={session}
-              focused={
-                openOperationRoute?.kind === "import" &&
-                openOperationRoute.importSessionId === session.id
-              }
-              actionPending={pendingImportSessionIds.has(session.id)}
-              onControl={(action) => void controlImport(session, action)}
-              onRetryRollback={() => void retryRollback(session)}
-            />
-          ))}
-        </section>
-      )}
-
-      {scanResult && (
-        <>
-          {profileDrafts && profileDrafts.length > 0 && settings && (
-            <CameraProfileConfirmation
-              drafts={profileDrafts}
-              profiles={settings.portable.cameraProfiles}
-              onChange={setProfileDrafts}
-              onConfirm={() => void confirmDetectedProfiles()}
-              writeMarker={writeSourceMarker}
-              markerDisabled={
-                sources.find(
-                  (source) => source.mountPath === scanResult.scan.root,
-                )?.readOnly ?? false
-              }
-              onWriteMarkerChange={setWriteSourceMarker}
-            />
-          )}
-          <ScanResults
-            result={scanResult}
-            selectedKeys={selectedKeys}
-            onSelectionChange={setSelectedKeys}
-            correctionValue={correctionValue}
-            onCorrectionValueChange={setCorrectionValue}
-            correctionUnit={correctionUnit}
-            onCorrectionUnitChange={setCorrectionUnit}
-            onApplyCorrection={() => void applyCorrection()}
-            busy={
-              scanningPath !== null || activeScanPaths.has(scanResult.scan.root)
-            }
-            filter={resultFilter}
-            onFilterChange={setResultFilter}
-            ratingFilter={ratingFilter}
-            onRatingFilterChange={setRatingFilter}
-            rejectionFilter={rejectionFilter}
-            onRejectionFilterChange={setRejectionFilter}
-            userMetadata={userMetadata}
-            onUserMetadataChange={updateUserMetadata}
-            excludedImportKeys={excludedImportKeys}
-            onExcludedImportKeysChange={(keys) => {
-              setExcludedImportKeys(keys);
-              invalidatePlan({
-                eventNames,
-                excludedItemKeys: [...keys],
-                itemProfileAssignments,
-                expandedEventIndexes: [...expandedEventIndexes],
-              });
-            }}
-            eventNames={eventNames}
-            onEventNameChange={(index, name) => {
-              const nextEventNames = { ...eventNames, [index]: name };
-              setEventNames(nextEventNames);
-              invalidatePlan({
-                eventNames: nextEventNames,
-                excludedItemKeys: [...excludedImportKeys],
-                itemProfileAssignments,
-                expandedEventIndexes: [...expandedEventIndexes],
-              });
-            }}
-            expandedEventIndexes={expandedEventIndexes}
-            onExpandedEventIndexesChange={updateExpandedEvents}
-            importPlan={importPlan}
-            planning={planning}
-            onPrepareImportPlan={() => void prepareImportPlan(false)}
-            onDeleteImportPlan={() => void deleteImportPlan()}
-            importSession={selectedImportSession}
-            importActionPending={importActionPending}
-            onBeginImport={() => void beginImport()}
-            importOperation={
-              settings?.portable.import.defaultOperation ?? "copy"
-            }
-            cameraProfiles={settings?.portable.cameraProfiles ?? []}
-            itemProfileAssignments={itemProfileAssignments}
-            onItemProfileAssignment={(key, profileId) => {
-              const nextAssignments = {
-                ...itemProfileAssignments,
-                [key]: profileId,
-              };
-              setItemProfileAssignments(nextAssignments);
-              invalidatePlan({
-                eventNames,
-                excludedItemKeys: [...excludedImportKeys],
-                itemProfileAssignments: nextAssignments,
-                expandedEventIndexes: [...expandedEventIndexes],
-              });
-            }}
-          />
-        </>
       )}
     </>
   );
@@ -2270,6 +2437,7 @@ function ScanResults({
   onPrepareImportPlan,
   onDeleteImportPlan,
   importSession,
+  hasActiveImportSession,
   importActionPending,
   onBeginImport,
   importOperation,
@@ -2305,6 +2473,7 @@ function ScanResults({
   onPrepareImportPlan: () => void;
   onDeleteImportPlan: () => void;
   importSession: ImportSession | null;
+  hasActiveImportSession: boolean;
   importActionPending: boolean;
   onBeginImport: () => void;
   importOperation: AppSettings["portable"]["import"]["defaultOperation"];
@@ -2313,6 +2482,7 @@ function ScanResults({
   onItemProfileAssignment: (key: string, profileId: string) => void;
 }) {
   const [previewKey, setPreviewKey] = useState<string | null>(null);
+  const showMobileReviewActions = useMediaQuery("(max-width: 560px)");
   const matches = new Map(
     result.importMatches.map((match) => [match.itemKey, match]),
   );
@@ -2394,6 +2564,13 @@ function ScanResults({
   const noEventsIncluded = importableItemKeys.every((key) =>
     excludedImportKeys.has(key),
   );
+  const includedImportItemCount = importableItemKeys.filter(
+    (key) => !excludedImportKeys.has(key),
+  ).length;
+  const importSessionActive =
+    hasActiveImportSession ||
+    (importSession !== null &&
+      !["completed", "cancelled"].includes(importSession.status));
 
   function setAllEventsIncluded(included: boolean) {
     const next = new Set(excludedImportKeys);
@@ -3021,7 +3198,7 @@ function ScanResults({
           }
         />
       )}
-      <section className="import-planner">
+      <section className="import-planner" id="import-plan-review">
         <div className="import-planner__heading">
           <div>
             <span className="section-label">
@@ -3082,10 +3259,7 @@ function ScanResults({
                 .length + excludedImportKeys.size
             }
             scanWarnings={result.scan.warnings}
-            sessionActive={
-              importSession !== null &&
-              !["completed", "cancelled"].includes(importSession.status)
-            }
+            sessionActive={importSessionActive}
           />
         )}
       </section>
@@ -3102,8 +3276,62 @@ function ScanResults({
           ))}
         </details>
       )}
+      {showMobileReviewActions && !importSessionActive && (
+        <aside
+          className="review-mobile-cta"
+          aria-label={l("Review actions", "Akcje przeglądu")}
+        >
+          <span className="review-mobile-cta__count" role="status">
+            {l("For import:", "Do importu:")}{" "}
+            <strong>{includedImportItemCount}</strong>
+          </span>
+          {importPlan ? (
+            <a className="review-mobile-cta__action" href="#import-plan-review">
+              {l("View plan", "Zobacz plan")}
+            </a>
+          ) : (
+            <button
+              type="button"
+              className="primary-action"
+              onClick={onPrepareImportPlan}
+              disabled={planning || busy}
+              aria-label={l(
+                "Prepare import plan from review bar",
+                "Przygotuj plan importu z paska przeglądu",
+              )}
+            >
+              {planning
+                ? l("Preparing…", "Przygotowywanie…")
+                : l("Prepare plan", "Przygotuj plan")}
+            </button>
+          )}
+        </aside>
+      )}
     </section>
   );
+}
+
+function useMediaQuery(query: string) {
+  const getMatches = () =>
+    typeof window !== "undefined" &&
+    typeof window.matchMedia === "function" &&
+    window.matchMedia(query).matches;
+  const [matches, setMatches] = useState(getMatches);
+
+  useEffect(() => {
+    if (
+      typeof window === "undefined" ||
+      typeof window.matchMedia !== "function"
+    )
+      return;
+    const mediaQuery = window.matchMedia(query);
+    const updateMatches = () => setMatches(mediaQuery.matches);
+    updateMatches();
+    mediaQuery.addEventListener("change", updateMatches);
+    return () => mediaQuery.removeEventListener("change", updateMatches);
+  }, [query]);
+
+  return matches;
 }
 
 function EventImportCheckbox({
@@ -3808,12 +4036,14 @@ function ImportSessionProgress({
   session,
   focused,
   actionPending,
+  actionError,
   onControl,
   onRetryRollback,
 }: {
   session: ImportSession;
   focused: boolean;
   actionPending: boolean;
+  actionError: ImportOperationError | null;
   onControl: (action: "resume" | "pause" | "cancel") => void;
   onRetryRollback: () => void;
 }) {
@@ -3882,7 +4112,22 @@ function ImportSessionProgress({
           {l("remaining", "do końca")}
         </p>
       )}
-      {session.lastError && <p className="import-error">{session.lastError}</p>}
+      {(actionError || session.lastError) && (
+        <ImportOperationErrorNotice
+          error={
+            actionError ??
+            normalizeImportOperationError(
+              session.status === "failedRecoverable"
+                ? {
+                    code: "sourceUnavailable",
+                    message: session.lastError,
+                  }
+                : session.lastError,
+              importSourceKind(session),
+            )
+          }
+        />
+      )}
       <div className="import-controls">
         {session.status === "running" && (
           <button
@@ -3907,9 +4152,11 @@ function ImportSessionProgress({
             disabled={actionPending}
             onClick={() => onControl("resume")}
           >
-            {session.status === "failed"
-              ? l("Retry", "Ponów")
-              : l("Resume", "Wznów")}
+            {session.status === "paused"
+              ? l("Resume", "Wznów")
+              : session.status === "planned"
+                ? l("Start", "Uruchom")
+                : l("Try again", "Ponów próbę")}
           </button>
         )}
         {session.status === "rollbackFailed" && (
@@ -3938,6 +4185,32 @@ function ImportSessionProgress({
   );
 }
 
+function ImportOperationErrorNotice({
+  error,
+}: {
+  error: ImportOperationError;
+}) {
+  return (
+    <div className="import-operation-error" role="alert">
+      <strong>{error.cause}</strong>
+      <p>{error.nextStep}</p>
+      <p>{error.retrySafety}</p>
+      {error.technicalDetails && (
+        <details>
+          <summary>{l("Technical details", "Szczegóły techniczne")}</summary>
+          <pre>{error.technicalDetails}</pre>
+        </details>
+      )}
+    </div>
+  );
+}
+
+function importSourceKind(session: ImportSession): ImportSourceKind {
+  return session.sourceIdentity || session.sourceFingerprint
+    ? "volume"
+    : "directory";
+}
+
 function sessionStatusLabel(status: ImportSession["status"]) {
   if (status === "planned")
     return l("Ready to start", "Gotowy do uruchomienia");
@@ -3951,8 +4224,8 @@ function sessionStatusLabel(status: ImportSession["status"]) {
     return l("Import stopped by an error", "Import zatrzymany przez błąd");
   if (status === "failedRecoverable")
     return l(
-      "Card unavailable — reconnect it and resume",
-      "Karta jest niedostępna — podłącz ją i wznów",
+      "Source unavailable — restore it and try again",
+      "Źródło jest niedostępne — przywróć je i ponów próbę",
     );
   if (status === "rollingBack")
     return l(

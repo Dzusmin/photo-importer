@@ -139,6 +139,10 @@ pub enum ManifestError {
     },
     #[error("source validation failed: {0}")]
     SourceValidation(String),
+    #[error("expected source file is missing: {0}")]
+    SourceFileMissing(PathBuf),
+    #[error("permission denied while reading source file: {0}")]
+    SourcePermissionDenied(PathBuf),
 }
 
 impl ImportManifest {

@@ -47,6 +47,12 @@
     "systemStatus": "System status",
     "reconnect": "Reconnect",
     "unsavedSettingsConfirmation": "You have unsaved settings changes. Leave Settings and discard them?",
+    "libraryOnboarding": {
+      "eyebrow": "FIRST STEP",
+      "title": "Choose your photo library",
+      "description": "Select the folder where Photo Importer should organize and keep your photos. You can change it later in Settings.",
+      "action": "Choose photo library"
+    },
     "historySyncError": {
       "title": "Import history needs attention",
       "impact": "The latest history changes could not be synchronized. Import and the rest of the application remain available.",

@@ -18,7 +18,7 @@ import { useTranslation } from "react-i18next";
 import { localize } from "./i18n";
 import "./i18n";
 import "./App.css";
-import { SettingsProvider } from "./shared/SettingsStore";
+import { SettingsProvider, useSettingsStore } from "./shared/SettingsStore";
 import {
   getBackgroundStatus,
   type BackgroundAttention,
@@ -59,6 +59,7 @@ function App() {
 
 function AppContent() {
   const { t } = useTranslation();
+  const settingsStore = useSettingsStore();
   const [status, setStatus] = useState<SystemStatus | null>(null);
   const [connectionState, setConnectionState] =
     useState<AppStatus>("connecting");
@@ -78,6 +79,7 @@ function AppContent() {
     useState<OperationRoute | null>(null);
   const [settingsDirty, setSettingsDirty] = useState(false);
   const [settingsDraftRevision, setSettingsDraftRevision] = useState(0);
+  const [settingsTarget, setSettingsTarget] = useState<"library" | null>(null);
   const [backgroundAttention, setBackgroundAttention] = useState<
     BackgroundAttention[]
   >([]);
@@ -242,9 +244,18 @@ function AppContent() {
     }
   }, []);
 
+  const libraryPath = settingsStore?.settings?.local.libraryPath;
+  const needsLibrarySetup = libraryPath === null;
+  const hasConfiguredLibrary = typeof libraryPath === "string";
+
   useEffect(() => {
+    if (libraryPath === undefined) return;
+    if (libraryPath === null) {
+      setHistorySyncFailure(null);
+      return;
+    }
     void syncImportHistory();
-  }, [syncImportHistory]);
+  }, [libraryPath, syncImportHistory]);
 
   useEffect(() => {
     if (activeView !== "activity") return;
@@ -366,6 +377,11 @@ function AppContent() {
     if (!navigateTo("home")) return;
     setSelectedPlanId(null);
     setSelectedOperationRoute(null);
+  }, [navigateTo]);
+
+  const openLibrarySettings = useCallback(() => {
+    setSettingsTarget("library");
+    navigateTo("settings");
   }, [navigateTo]);
 
   const openBackgroundWorkflow = useCallback(
@@ -533,7 +549,7 @@ function AppContent() {
             after the user explicitly agrees to discard it.
           */}
           <section className="persistent-home" hidden={activeView !== "home"}>
-            {activeView === "home" && (
+            {activeView === "home" && hasConfiguredLibrary && (
               <BackgroundMonitor
                 appStatus={appStatus}
                 onHealthChange={reportMonitorHealth}
@@ -542,27 +558,46 @@ function AppContent() {
                 mode="compact"
               />
             )}
-            <SourceScanner
-              appStatus={appStatus}
-              onHealthChange={reportScannerHealth}
-              openWorkflowId={selectedPlanId}
-              openOperationRoute={
-                selectedOperationRoute?.kind === "scan" ||
-                selectedOperationRoute?.kind === "import"
-                  ? selectedOperationRoute
-                  : null
-              }
-              onOpenHistory={() => {
-                setSelectedPlanId(null);
-                navigateTo("activity");
-              }}
-            />
+            {needsLibrarySetup ? (
+              <section
+                className="library-onboarding"
+                aria-labelledby="library-onboarding-title"
+              >
+                <p className="section-label">
+                  {t("app.libraryOnboarding.eyebrow")}
+                </p>
+                <h2 id="library-onboarding-title">
+                  {t("app.libraryOnboarding.title")}
+                </h2>
+                <p>{t("app.libraryOnboarding.description")}</p>
+                <button type="button" onClick={openLibrarySettings}>
+                  {t("app.libraryOnboarding.action")}
+                </button>
+              </section>
+            ) : hasConfiguredLibrary ? (
+              <SourceScanner
+                appStatus={appStatus}
+                onHealthChange={reportScannerHealth}
+                openWorkflowId={selectedPlanId}
+                openOperationRoute={
+                  selectedOperationRoute?.kind === "scan" ||
+                  selectedOperationRoute?.kind === "import"
+                    ? selectedOperationRoute
+                    : null
+                }
+                onOpenHistory={() => {
+                  setSelectedPlanId(null);
+                  navigateTo("activity");
+                }}
+              />
+            ) : null}
           </section>
           {mountedViews.has("settings") && (
             <section hidden={activeView !== "settings"}>
               <SettingsPanel
                 key={settingsDraftRevision}
                 onDirtyChange={setSettingsDirty}
+                focusSection={settingsTarget}
               />
             </section>
           )}

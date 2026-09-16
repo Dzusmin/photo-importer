@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState, type RefObject } from "react";
 import { open, save } from "@tauri-apps/plugin-dialog";
 import { clearThumbnailCache } from "../../shared/sources";
 import { describeOperationalError } from "../../shared/appStatus";
@@ -48,8 +48,10 @@ type Notice =
 
 export function SettingsPanel({
   onDirtyChange,
+  focusSection,
 }: {
   onDirtyChange?: (dirty: boolean) => void;
+  focusSection?: "library" | null;
 }) {
   const { t, i18n } = useTranslation();
   const settingsStore = useSettingsStore();
@@ -63,6 +65,7 @@ export function SettingsPanel({
     previousPath: string;
     nextPath: string;
   } | null>(null);
+  const librarySectionRef = useRef<HTMLDivElement>(null);
 
   const validationErrors = useMemo(
     () => (settings ? validateSettings(settings) : []),
@@ -89,6 +92,14 @@ export function SettingsPanel({
       );
     }
   }, [settingsStore?.response]);
+
+  useEffect(() => {
+    if (focusSection !== "library" || !settings) return;
+    librarySectionRef.current?.scrollIntoView?.({ block: "start" });
+    librarySectionRef.current
+      ?.querySelector<HTMLButtonElement>("button")
+      ?.focus();
+  }, [focusSection, settings]);
 
   async function reload() {
     setBusy(true);
@@ -350,6 +361,7 @@ export function SettingsPanel({
       <AppearanceSettings />
 
       <SettingsSection
+        sectionRef={librarySectionRef}
         title={t("settings.library.title")}
         description={t("settings.library.description")}
       >
@@ -971,13 +983,15 @@ function SettingsSection({
   title,
   description,
   children,
+  sectionRef,
 }: {
   title: string;
   description: string;
   children: React.ReactNode;
+  sectionRef?: RefObject<HTMLDivElement | null>;
 }) {
   return (
-    <div className="settings-section">
+    <div className="settings-section" ref={sectionRef}>
       <div className="settings-section__intro">
         <h3>{title}</h3>
         <p>{description}</p>

@@ -1,15 +1,15 @@
 # Photo Importer
 
-A cross-platform application for safely importing photos, grouping them into
-events, and creating verified backups.
+A cross-platform desktop application for safely importing photos, grouping
+them into events, and creating verified backups.
 
-The project has a working application foundation and a complete settings
-vertical: the domain model, validation, atomic persistence, recovery backup,
-Tauri commands, and a React screen.
+The application includes the complete manual and automatic card workflow,
+resumable imports, activity tracking, settings recovery, and verified local
+backups. The interface is available in English and Polish.
 
 ## Baseline status
 
-As of September 2, 2026, the functional baseline includes:
+As of September 16, 2026, the functional baseline includes:
 
 - a Tauri desktop application with a React interface for configuration, source
   detection and scanning, grouping media into events, and thumbnail previews,
@@ -17,6 +17,9 @@ As of September 2, 2026, the functional baseline includes:
   handling, SHA-256 checksums, and a persistent SQLite manifest,
 - memory-card monitoring, system tray operation, autostart, and notifications,
 - local, versioned, and verified library backups,
+- first-run library onboarding, actionable recovery errors, and a responsive
+  interface supported down to a 420 px window width,
+- one activity center for scans, imports, backup planning, and backup jobs,
 - frontend unit and integration tests and tests for every Rust crate, also run
   by the `ci` service in Docker Compose.
 
@@ -93,9 +96,10 @@ The workflow in `.github/workflows/ci.yml` runs Rust checks on all three.
 
 The current implementation and its automated tests are the executable source
 of truth for application behavior. This README is the maintained operational
-summary. `docs/automatic-card-import-plan.md` is a design and implementation
-history whose explicit current-behavior notes supersede its older future-tense
-stage descriptions.
+summary. Additional maintained notes cover the
+[`backup job lifecycle`](docs/backup-job-lifecycle.md),
+[`thumbnail performance`](docs/thumbnail-performance.md), and the small set of
+remaining [`UI follow-ups`](docs/ui-follow-ups.md).
 
 The settings repository receives its configuration directory from the
 application layer. On the second and every subsequent save, the previous valid
@@ -109,14 +113,16 @@ exported JSON contains only portable settings—it omits local paths, autostart,
 minimization, and media identifiers. Imported settings are validated and saved
 using the same safe mechanism as regular edits.
 
-The home screen refreshes the media list every five seconds, detects removable
-cards and volumes containing `DCIM`, and allows users to scan directories they
-select manually. The scanner recognizes common JPEG, HEIC, RAW, video, and XMP
-files. RAW+JPEG files and their sidecars are combined into a single item, and
-items are assigned to events according to the user-configured time gap. Capture
-time is read from EXIF or video metadata, with a controlled fallback to the
-file modification time. Scan results allow the user to adjust the time of one
-or more items and immediately regroup the events.
+On first launch, the home screen asks the user to choose a photo library before
+starting history synchronization or source scanning. Once configured, it
+refreshes the media list every five seconds, detects removable cards and
+volumes containing `DCIM`, and allows users to scan directories they select
+manually. The scanner recognizes common JPEG, HEIC, RAW, video, and XMP files.
+RAW+JPEG files and their sidecars are combined into a single item, and items
+are assigned to events according to the user-configured time gap. Capture time
+is read from EXIF or video metadata, with a controlled fallback to the file
+modification time. Scan results allow the user to adjust the time of one or
+more items and immediately regroup the events.
 
 `crates/importer-manifest/` stores a versioned SQLite database of files that
 have already been imported. Comparisons begin with file size and use the
@@ -138,6 +144,11 @@ the manifest, and shows the exact path for every file. Collisions either stop
 planning or receive one shared next sequence number for the entire
 RAW+JPEG+XMP group, according to the user's setting.
 
+An active scan, review, plan, or import is shown before the source monitor. The
+monitor collapses to a contextual row naming the selected folder or memory
+card. In windows up to 560 px wide, review keeps the included-item count and
+the next planning action fixed at the bottom of the workspace.
+
 A completed plan can be saved as a persistent import session and started. Each
 file is copied to a session-owned `.partial` file, synchronized, compared with
 the original by SHA-256, and published without overwriting an existing path.
@@ -145,7 +156,9 @@ The manifest is updated only after successful verification. Progress, errors,
 and pause and cancellation requests are stored in SQLite, so an interrupted
 import can be resumed after restarting the application. Move mode deletes
 source files only after all planned copies have been verified and requires an
-additional confirmation.
+additional confirmation. If a source disappears or the wrong card is
+connected, the session shows the cause, the corrective action, and a safe retry
+using the same persisted session.
 
 Scanning runs as a job that reports successive phases. During file discovery,
 the interface shows an animated progress bar; once the number of supported
@@ -189,8 +202,9 @@ durable card UUID, a fresh scan, current plan-affecting settings, `Copy` mode,
 and a ready, non-empty plan without conflicts. A restored plan is rebuilt from
 the fresh scan, retaining only event names, exclusions, and camera assignments
 that still match current items and valid profiles. If a gate fails, the import
-does not start and a durable needs-attention item is shown. The home screen and
-activity center expose current operations and link to the exact job.
+does not start and a durable needs-attention item is shown. The home screen
+prioritizes the active workflow over the idle source monitor. The activity
+center exposes current operations and links to the exact job.
 
 The application has a system tray icon with actions to show the window, check
 media immediately, and quit. Closing the window hides it when minimize to tray
@@ -215,7 +229,4 @@ backup corruption. New content is written to a temporary file, synchronized,
 and verified before publication; the replaced version is moved to a hidden
 archive and is not deleted.
 
-NAS and network-share adapters are planned for the next stage.
-
-Further engine components will be added as independent crates so they can also
-be tested without launching the desktop interface.
+NAS and network-share adapters remain outside the current release.

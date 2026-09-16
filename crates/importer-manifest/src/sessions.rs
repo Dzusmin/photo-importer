@@ -540,11 +540,17 @@ impl ImportManifest {
             }
             let candidate = source_root.join(&operation.source_relative_path);
             let actual = std::fs::metadata(&candidate)
-                .map_err(|_| {
-                    ManifestError::SourceValidation(format!(
-                        "brak oczekiwanego pliku źródłowego: {}",
+                .map_err(|error| match error.kind() {
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotConnected => {
+                        ManifestError::SourceFileMissing(operation.source_relative_path.clone())
+                    }
+                    std::io::ErrorKind::PermissionDenied => ManifestError::SourcePermissionDenied(
+                        operation.source_relative_path.clone(),
+                    ),
+                    _ => ManifestError::SourceValidation(format!(
+                        "nie można odczytać pliku źródłowego {}: {error}",
                         operation.source_relative_path.display()
-                    ))
+                    )),
                 })?
                 .len();
             if actual != operation.size_bytes {

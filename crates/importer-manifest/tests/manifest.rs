@@ -494,6 +494,45 @@ fn setting_session_running_clears_stale_controls_and_error() {
 }
 
 #[test]
+fn source_relink_reports_a_missing_file_with_only_its_relative_path() {
+    use importer_manifest::{
+        ImportSessionOperation, ManifestError, NewImportOperation, NewImportSession,
+    };
+    let directory = tempfile::tempdir().unwrap();
+    let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();
+    let source_root = directory.path().join("reconnected-card");
+    fs::create_dir_all(&source_root).unwrap();
+    let session = manifest
+        .create_import_session(&NewImportSession {
+            operation: ImportSessionOperation::Copy,
+            library_root: directory.path().join("library"),
+            source_fingerprint: None,
+            source_identity: None,
+            move_confirmed: false,
+            operations: vec![NewImportOperation {
+                item_key: "item".into(),
+                event_name: "event".into(),
+                source_path: directory.path().join("old-card/DCIM/IMG.JPG"),
+                source_relative_path: "DCIM/IMG.JPG".into(),
+                destination_path: directory.path().join("library/event/IMG.JPG"),
+                destination_relative_path: "event/IMG.JPG".into(),
+                kind: "jpeg".into(),
+                size_bytes: 10,
+            }],
+        })
+        .unwrap();
+
+    let error = manifest
+        .validate_and_relink_session_source(&session.id, &source_root)
+        .unwrap_err();
+
+    assert!(matches!(
+        error,
+        ManifestError::SourceFileMissing(path) if path == std::path::Path::new("DCIM/IMG.JPG")
+    ));
+}
+
+#[test]
 fn recording_the_same_hash_updates_its_browsable_destination() {
     let directory = tempfile::tempdir().unwrap();
     let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();

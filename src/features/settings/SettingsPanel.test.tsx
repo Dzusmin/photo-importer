@@ -16,16 +16,32 @@ vi.mock("@tauri-apps/plugin-dialog", () => ({
   save: vi.fn(),
 }));
 
-function renderSettingsPanel(onDirtyChange?: (dirty: boolean) => void) {
+function renderSettingsPanel(
+  onDirtyChange?: (dirty: boolean) => void,
+  focusSection?: "library" | null,
+) {
   return render(
     <ThemeProvider>
-      <SettingsPanel onDirtyChange={onDirtyChange} />
+      <SettingsPanel
+        onDirtyChange={onDirtyChange}
+        focusSection={focusSection}
+      />
     </ThemeProvider>,
   );
 }
 
 describe("SettingsPanel", () => {
   beforeEach(() => openDialog.mockReset());
+
+  it("focuses the library chooser when opened from onboarding", async () => {
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+    });
+
+    renderSettingsPanel(undefined, "library");
+
+    expect(await screen.findByRole("button", { name: "Choose" })).toHaveFocus();
+  });
 
   it("reports when the local settings draft becomes dirty and clean again", async () => {
     mockIPC((command) => {

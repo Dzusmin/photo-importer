@@ -130,6 +130,167 @@ describe("SourceScanner", () => {
     expect(refreshCount).toBe(2);
   });
 
+  it("keeps card workflow content before a compact source monitor in every active state", async () => {
+    let finishPlanning!: (plan: ImportPlan) => void;
+    const planning = new Promise<ImportPlan>((resolve) => {
+      finishPlanning = resolve;
+    });
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "build_import_plan_preview") return planning;
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session")
+        return importSessionFixture({ status: "running" });
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    const { container } = render(<SourceScanner />);
+
+    const hero = await waitFor(() => {
+      const element = container.querySelector<HTMLElement>(".source-hero");
+      expect(element).toHaveAttribute("data-import-view-state", "idle");
+      expect(element).not.toHaveClass("source-hero--compact");
+      expect(
+        within(element!).getByRole("heading", {
+          name: "Wykryto nośnik aparatu.",
+        }),
+      ).toBeInTheDocument();
+      return element!;
+    });
+
+    await user.click(screen.getByRole("button", { name: "Skanuj" }));
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "scanning"),
+    );
+    expect(hero).toHaveClass("source-hero--compact");
+    expect(
+      within(hero).getByRole("heading", { name: "Karta pamięci: CAMERA" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Wybierz inny katalog" }),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("region", { name: "Aktywne skany" })
+        .compareDocumentPosition(hero) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.queryByText("Czekam na kartę pamięci."),
+    ).not.toBeInTheDocument();
+
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        status: "completed",
+        phase: "completed",
+        result: mediaResult(),
+      }),
+    );
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "review"),
+    );
+    const review = container.querySelector<HTMLElement>(".scan-results")!;
+    expect(
+      review.compareDocumentPosition(hero) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await user.click(
+      await screen.findByRole("button", { name: "Przygotuj plan" }),
+    );
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "planning"),
+    );
+    finishPlanning(importPlan());
+    await screen.findByRole("button", { name: "Rozpocznij import" });
+
+    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "importing"),
+    );
+    expect(
+      screen
+        .getByRole("region", { name: "Sesje importu" })
+        .compareDocumentPosition(hero) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ status: "completed" }),
+    );
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "idle"),
+    );
+    expect(hero).not.toHaveClass("source-hero--compact");
+    expect(container.querySelector(".scan-results")).not.toBeInTheDocument();
+  });
+
+  it("describes a manually selected folder in the compact source row", async () => {
+    openDialog.mockResolvedValue("C:\\Zdjęcia rodzinne");
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "start_media_scan")
+        return scanJobFixture({ path: "C:\\Zdjęcia rodzinne" });
+    });
+    const user = userEvent.setup();
+    const { container } = render(<SourceScanner />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Wybierz katalog ręcznie" }),
+    );
+
+    const hero = container.querySelector<HTMLElement>(".source-hero")!;
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "scanning"),
+    );
+    expect(hero).toHaveClass("source-hero--compact");
+    expect(
+      within(hero).getByRole("heading", {
+        name: "Wybrany katalog: Zdjęcia rodzinne",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      within(hero).getByRole("button", { name: "Zmień katalog" }),
+    ).toBeInTheDocument();
+    expect(
+      screen
+        .getByRole("region", { name: "Aktywne skany" })
+        .compareDocumentPosition(hero) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        path: "C:\\Zdjęcia rodzinne",
+        status: "cancelled",
+      }),
+    );
+    await waitFor(() =>
+      expect(hero).toHaveAttribute("data-import-view-state", "idle"),
+    );
+    expect(hero).not.toHaveClass("source-hero--compact");
+    expect(
+      within(hero).getByRole("heading", {
+        name: "Czekam na kartę pamięci.",
+      }),
+    ).toBeInTheDocument();
+  });
+
   it("discovers a card, reports scan progress, cancels and accepts completion", async () => {
     const cancelled = vi.fn();
     mockIPC((command) => {
@@ -596,6 +757,9 @@ describe("SourceScanner", () => {
         return [];
       if (command === "start_media_scan") return scanJobFixture();
       if (command === "build_import_plan_preview") return importPlan();
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session")
+        return importSessionFixture({ status: "running" });
       if (command === "get_media_thumbnail") throw new Error("no preview");
     });
     const user = userEvent.setup();
@@ -1014,10 +1178,11 @@ describe("SourceScanner", () => {
     ).toHaveLength(1);
   });
 
-  it("keeps the pending workflow when starting the import fails", async () => {
+  it("shows a disconnected-card error inline and retries the same session", async () => {
     const source = sourceFixture();
     const workflow = pendingPlanWorkflow(source);
     const calls: string[] = [];
+    let startAttempts = 0;
     mockIPC((command) => {
       calls.push(command);
       if (command === "load_settings") return settingsResponseFixture();
@@ -1030,12 +1195,37 @@ describe("SourceScanner", () => {
       )
         return [];
       if (command === "get_media_thumbnail") throw new Error("no preview");
-      if (command === "create_import_session") return importSessionFixture();
+      if (command === "create_import_session")
+        return importSessionFixture({
+          operations: [
+            {
+              id: 1,
+              ordinal: 0,
+              itemKey: "img",
+              eventName: "event",
+              sourcePath: "E:\\DCIM\\IMG.JPG",
+              sourceRelativePath: "DCIM\\IMG.JPG",
+              destinationPath: "C:\\Library\\event\\IMG.JPG",
+              destinationRelativePath: "event\\IMG.JPG",
+              kind: "jpeg",
+              sizeBytes: 10,
+              status: "pending",
+              sourceSha256: null,
+              destinationSha256: null,
+              attempts: 0,
+              lastError: null,
+              sourceDeleted: false,
+            },
+          ],
+        });
       if (command === "start_import_session") {
-        throw {
-          code: "importStartFailed",
-          message: "Import was not accepted",
-        };
+        startAttempts += 1;
+        if (startAttempts === 1)
+          throw {
+            code: "sourceUnavailable",
+            message: "The original card is not connected",
+          };
+        return importSessionFixture({ status: "running" });
       }
     });
     const user = userEvent.setup();
@@ -1046,10 +1236,28 @@ describe("SourceScanner", () => {
     );
 
     expect(
-      await screen.findByText("Nie udało się zakończyć operacji importu."),
+      await screen.findByText("Oryginalna karta pamięci nie jest podłączona."),
     ).toBeInTheDocument();
-    expect(calls).toContain("start_import_session");
+    expect(
+      screen.getByText(
+        "Podłącz ponownie kartę użytą do przygotowania tego importu.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/Ponowienie po usunięciu przyczyny/),
+    ).toBeInTheDocument();
     expect(calls).not.toContain("delete_pending_source_workflow");
+    await user.click(screen.getByRole("button", { name: "Ponów próbę" }));
+
+    await waitFor(() =>
+      expect(
+        calls.filter((command) => command === "start_import_session"),
+      ).toHaveLength(2),
+    );
+    expect(
+      calls.filter((command) => command === "create_import_session"),
+    ).toHaveLength(1);
+    expect(calls).toContain("delete_pending_source_workflow");
   });
 
   it("invalidates a restored plan when a non-naming plan setting changed", async () => {
@@ -1247,6 +1455,91 @@ describe("SourceScanner", () => {
     });
   });
 
+  it("explains a missing file in a manual folder and retries the same session", async () => {
+    const root = "C:\\Photos";
+    const response = mediaResult();
+    response.scan.root = root;
+    const commands: Array<{ command: string; args: Record<string, unknown> }> =
+      [];
+    let startAttempts = 0;
+    openDialog.mockResolvedValue(root);
+    mockIPC((command, args) => {
+      commands.push({ command, args: (args ?? {}) as Record<string, unknown> });
+      if (command === "load_settings") return settingsResponseFixture();
+      if (command === "list_media_sources") return [];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture({ path: root });
+      if (command === "build_import_plan_preview") return importPlan();
+      if (command === "create_import_session")
+        return importSessionFixture({
+          sourceFingerprint: null,
+          sourceIdentity: null,
+        });
+      if (command === "start_import_session") {
+        startAttempts += 1;
+        if (startAttempts === 1)
+          throw {
+            code: "sourceFileMissing",
+            message: "Brak oczekiwanego pliku źródłowego: DCIM/IMG.JPG",
+          };
+        return importSessionFixture({
+          status: "running",
+          sourceFingerprint: null,
+          sourceIdentity: null,
+        });
+      }
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+    render(<SourceScanner />);
+
+    await user.click(
+      await screen.findByRole("button", { name: "Wybierz katalog ręcznie" }),
+    );
+    await emit(
+      "scan-progress",
+      scanJobFixture({
+        path: root,
+        status: "completed",
+        phase: "completed",
+        result: response,
+      }),
+    );
+    await user.click(
+      await screen.findByRole("button", { name: "Przygotuj plan" }),
+    );
+    await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
+
+    expect(
+      await screen.findByText(
+        "Oczekiwany plik lub katalog źródłowy nie jest już dostępny.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Przywróć oryginalny katalog i plik w tym samym miejscu.",
+      ),
+    ).toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "Ponów próbę" }));
+
+    expect(
+      commands.filter(({ command }) => command === "create_import_session"),
+    ).toHaveLength(1);
+    expect(
+      commands.filter(({ command }) => command === "start_import_session"),
+    ).toHaveLength(2);
+    expect(
+      commands.filter(({ command }) => command === "start_import_session")[1]
+        ?.args,
+    ).toEqual({ sessionId: "session-1", sourceRoot: root });
+  });
+
   it("does not create a card session when the prepared source is disconnected", async () => {
     const response = mediaResult();
     const calls: string[] = [];
@@ -1263,6 +1556,9 @@ describe("SourceScanner", () => {
         return [];
       if (command === "start_media_scan") return scanJobFixture();
       if (command === "build_import_plan_preview") return importPlan();
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session")
+        return importSessionFixture({ status: "running" });
       if (command === "get_media_thumbnail") throw new Error("no preview");
     });
     const user = userEvent.setup();
@@ -1285,7 +1581,7 @@ describe("SourceScanner", () => {
     view.rerender(<SourceScanner appStatus="connecting" />);
     await waitFor(() =>
       expect(
-        screen.getByRole("heading", { name: "Sprawdzam dostępne źródła…" }),
+        screen.getByRole("heading", { name: "Karta pamięci: CAMERA" }),
       ).toBeInTheDocument(),
     );
     await user.click(screen.getByRole("button", { name: "Rozpocznij import" }));
@@ -1372,11 +1668,13 @@ describe("SourceScanner", () => {
     const user = userEvent.setup();
     render(<SourceScanner />);
 
-    await user.click(await screen.findByRole("button", { name: "Wznów" }));
+    await user.click(
+      await screen.findByRole("button", { name: "Ponów próbę" }),
+    );
 
     expect(calls).not.toContain("start_import_session");
     expect(
-      screen.getByText(/Pierwotna obserwacja karty jest niedostępna/),
+      screen.getByText("Oryginalna karta pamięci nie jest podłączona."),
     ).toBeInTheDocument();
   });
 
@@ -1850,9 +2148,13 @@ describe("SourceScanner", () => {
       }),
     );
     expect(
-      await screen.findByText("Karta jest niedostępna — podłącz ją i wznów"),
+      await screen.findByText(
+        "Źródło jest niedostępne — przywróć je i ponów próbę",
+      ),
     ).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Wznów" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Ponów próbę" }),
+    ).toBeInTheDocument();
 
     await emit(
       "rollback-progress",
@@ -1933,6 +2235,87 @@ describe("SourceScanner", () => {
     ).toBeInTheDocument();
   });
 
+  it("clears an earlier completion notice when another import starts and pauses", async () => {
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (
+        command === "list_media_sources" ||
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+    });
+
+    render(<SourceScanner />);
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ id: "session-a", status: "completed" }),
+    );
+    expect(
+      await screen.findByText("Import został zakończony."),
+    ).toBeInTheDocument();
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ id: "session-b", status: "running" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Import został zakończony."),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("region", { name: "Sesja importu session-b" }),
+    ).toBeInTheDocument();
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ id: "session-b", status: "paused" }),
+    );
+    expect(await screen.findByText("Import wstrzymany")).toBeInTheDocument();
+    expect(
+      screen.queryByText("Import został zakończony."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("does not show a background completion over another active import", async () => {
+    const running = importSessionFixture({
+      id: "session-b",
+      status: "running",
+    });
+    mockIPC((command) => {
+      if (command === "load_settings") return settingsResponseFixture();
+      if (
+        command === "list_media_sources" ||
+        command === "list_media_scans" ||
+        command === "list_pending_source_workflows"
+      )
+        return [];
+      if (command === "list_import_sessions") return [running];
+    });
+
+    render(<SourceScanner />);
+    expect(
+      await screen.findByRole("region", { name: "Sesja importu session-b" }),
+    ).toBeInTheDocument();
+
+    await emit(
+      "import-progress",
+      importSessionFixture({ id: "session-a", status: "completed" }),
+    );
+
+    await waitFor(() =>
+      expect(
+        screen.queryByText("Import został zakończony."),
+      ).not.toBeInTheDocument(),
+    );
+    expect(
+      screen.getByRole("region", { name: "Sesja importu session-b" }),
+    ).toBeInTheDocument();
+  });
+
   it("focuses the exact scan or import selected in the operations center", async () => {
     const scan = scanJobFixture({
       id: "scan-route",
@@ -1978,6 +2361,148 @@ describe("SourceScanner", () => {
     });
     await waitFor(() => expect(importPanel).toHaveClass("operation-focus"));
     expect(importPanel).toHaveFocus();
+  });
+
+  it("offers narrow review actions with an import inclusion count and a safe plan link", async () => {
+    const mediaQueryListeners = new Set<(event: MediaQueryListEvent) => void>();
+    vi.stubGlobal(
+      "matchMedia",
+      vi.fn((query: string) => ({
+        matches: query === "(max-width: 560px)",
+        media: query,
+        onchange: null,
+        addEventListener: (
+          _event: string,
+          listener: (event: MediaQueryListEvent) => void,
+        ) => mediaQueryListeners.add(listener),
+        removeEventListener: (
+          _event: string,
+          listener: (event: MediaQueryListEvent) => void,
+        ) => mediaQueryListeners.delete(listener),
+        addListener: vi.fn(),
+        removeListener: vi.fn(),
+        dispatchEvent: vi.fn(),
+      })),
+    );
+    const response = mediaResult();
+    const secondItem = {
+      ...mediaItem(),
+      key: "img-2",
+      files: mediaItem().files.map((file) => ({
+        ...file,
+        path: "E:\\DCIM\\IMG-2.JPG",
+        relativePath: "DCIM\\IMG-2.JPG",
+      })),
+    };
+    response.scan.items.push(secondItem);
+    response.scan.supportedFileCount = 2;
+    response.scan.totalSizeBytes = 20;
+    response.events[0]?.items.push(secondItem);
+    response.importMatches.push({
+      itemKey: secondItem.key,
+      state: "new",
+      importedFileCount: 0,
+      totalFileCount: 1,
+      importedPaths: [],
+      importedSourcePaths: [],
+    });
+    const calls: string[] = [];
+    const settings = settingsResponseFixture();
+    settings.settings.local.libraryPath = "C:\\Library";
+    mockIPC((command) => {
+      calls.push(command);
+      if (command === "load_settings") return settings;
+      if (command === "list_media_sources") return [sourceFixture()];
+      if (
+        command === "list_media_scans" ||
+        command === "list_import_sessions" ||
+        command === "list_pending_source_workflows" ||
+        command === "list_photo_user_metadata"
+      )
+        return [];
+      if (command === "start_media_scan") return scanJobFixture();
+      if (command === "build_import_plan_preview") return importPlan();
+      if (command === "create_import_session") return importSessionFixture();
+      if (command === "start_import_session")
+        return importSessionFixture({ status: "running" });
+      if (command === "get_media_thumbnail") throw new Error("no preview");
+    });
+    const user = userEvent.setup();
+
+    try {
+      const { container } = render(<SourceScanner />);
+      await user.click(await screen.findByRole("button", { name: "Skanuj" }));
+      await emit(
+        "scan-progress",
+        scanJobFixture({
+          status: "completed",
+          phase: "completed",
+          result: response,
+        }),
+      );
+
+      const reviewActions = await screen.findByRole("complementary", {
+        name: "Akcje przeglądu",
+      });
+      expect(reviewActions).toHaveClass("review-mobile-cta");
+      expect(within(reviewActions).getByRole("status")).toHaveTextContent(
+        "Do importu: 2",
+      );
+      expect(
+        within(reviewActions).getByRole("button", {
+          name: "Przygotuj plan importu z paska przeglądu",
+        }),
+      ).toHaveTextContent("Przygotuj plan");
+
+      await user.click(
+        screen.getByRole("button", {
+          name: /Rozwiń wydarzenie wydarzenie-01/,
+        }),
+      );
+      await user.click(
+        screen.getAllByLabelText("Zaznacz do korekty czasu")[0]!,
+      );
+      expect(within(reviewActions).getByRole("status")).toHaveTextContent(
+        "Do importu: 2",
+      );
+      await user.click(
+        screen.getAllByRole("button", { name: "pomiń w planie" })[0]!,
+      );
+      expect(within(reviewActions).getByRole("status")).toHaveTextContent(
+        "Do importu: 1",
+      );
+
+      await user.click(
+        within(reviewActions).getByRole("button", {
+          name: "Przygotuj plan importu z paska przeglądu",
+        }),
+      );
+      const planLink = await within(reviewActions).findByRole("link", {
+        name: "Zobacz plan",
+      });
+      expect(planLink).toHaveAttribute("href", "#import-plan-review");
+      expect(container.querySelector("#import-plan-review")).toBeInstanceOf(
+        HTMLElement,
+      );
+      expect(calls).toContain("build_import_plan_preview");
+      expect(
+        screen.getAllByRole("button", { name: "Rozpocznij import" }),
+      ).toHaveLength(1);
+      await user.click(
+        screen.getByRole("button", { name: "Rozpocznij import" }),
+      );
+      await waitFor(() => expect(calls).toContain("start_import_session"));
+      await waitFor(() =>
+        expect(
+          screen.queryByRole("complementary", { name: "Akcje przeglądu" }),
+        ).not.toBeInTheDocument(),
+      );
+      expect(
+        await screen.findByRole("region", { name: "Sesja importu session-1" }),
+      ).toBeInTheDocument();
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });
 

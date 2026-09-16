@@ -148,11 +148,7 @@ fn determine_import_engine_health(
     let mut issues = Vec::new();
     match library_path {
         Err(error) => issues.push((EngineHealthSeverity::Error, u64::MAX, error)),
-        Ok(None) => issues.push((
-            EngineHealthSeverity::Degraded,
-            u64::MAX,
-            "Biblioteka zdjęć nie jest skonfigurowana.".to_owned(),
-        )),
+        Ok(None) => {}
         Ok(Some(path)) if !path.is_dir() => issues.push((
             EngineHealthSeverity::Degraded,
             u64::MAX,
@@ -317,6 +313,14 @@ mod tests {
             Ok(Vec::new()),
             Ok(()),
         );
+
+        assert_eq!(health.severity, EngineHealthSeverity::Ready);
+        assert_eq!(health.last_error, None);
+    }
+
+    #[test]
+    fn import_engine_health_is_ready_before_a_library_is_configured() {
+        let health = determine_import_engine_health(Ok(None), Ok(Vec::new()), Ok(()));
 
         assert_eq!(health.severity, EngineHealthSeverity::Ready);
         assert_eq!(health.last_error, None);

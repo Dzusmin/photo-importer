@@ -47,6 +47,12 @@
     "systemStatus": "Stan systemu",
     "reconnect": "Połącz ponownie",
     "unsavedSettingsConfirmation": "Masz niezapisane zmiany ustawień. Opuścić Ustawienia i je porzucić?",
+    "libraryOnboarding": {
+      "eyebrow": "PIERWSZY KROK",
+      "title": "Wybierz bibliotekę zdjęć",
+      "description": "Wskaż folder, w którym Photo Importer ma porządkować i przechowywać zdjęcia. Możesz go później zmienić w Ustawieniach.",
+      "action": "Wybierz bibliotekę zdjęć"
+    },
     "historySyncError": {
       "title": "Historia importu wymaga uwagi",
       "impact": "Nie udało się zsynchronizować najnowszych zmian historii. Import i pozostałe funkcje aplikacji są nadal dostępne.",

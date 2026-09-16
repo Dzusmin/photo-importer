@@ -334,29 +334,101 @@ pub(crate) fn start_import_session(
                     .find(|volume| session_source_matches(&session, volume))
             });
         let volume = volume.ok_or_else(|| {
-            ImportCommandError::new("sourceUnavailable", "Właściwa karta nie jest podłączona.")
-        })?;
-        if !session_source_matches(&session, volume) {
-            return Err(ImportCommandError::new(
-                "wrongSource",
-                "Podłączony nośnik nie odpowiada karcie zapisanej w sesji.",
-            ));
-        }
-        service
-            .manifest
-            .validate_and_relink_session_source(&session_id, &volume.mount_path)
-            .map_err(manifest_error)?;
-    } else {
-        let source_root = source_root.as_ref().ok_or_else(|| {
-            ImportCommandError::new(
-                "sourceRootRequired",
-                "Import z ręcznego katalogu wymaga jawnego katalogu źródłowego.",
+            recoverable_start_error(
+                &service,
+                &session_id,
+                ImportCommandError::new("sourceUnavailable", "Właściwa karta nie jest podłączona."),
             )
         })?;
-        service
+        if !session_source_matches(&session, volume) {
+            return Err(recoverable_start_error(
+                &service,
+                &session_id,
+                ImportCommandError::new(
+                    "wrongSource",
+                    "Podłączony nośnik nie odpowiada karcie zapisanej w sesji.",
+                ),
+            ));
+        }
+        if let Err(error) = service
+            .manifest
+            .validate_and_relink_session_source(&session_id, &volume.mount_path)
+        {
+            let recoverable = matches!(
+                &error,
+                importer_manifest::ManifestError::SourceFileMissing(_)
+                    | importer_manifest::ManifestError::SourcePermissionDenied(_)
+            );
+            let error = manifest_error(error);
+            return Err(if recoverable {
+                recoverable_start_error(&service, &session_id, error)
+            } else {
+                error
+            });
+        }
+    } else {
+        let source_root = source_root.as_ref().ok_or_else(|| {
+            recoverable_start_error(
+                &service,
+                &session_id,
+                ImportCommandError::new(
+                    "sourceRootRequired",
+                    "Import z ręcznego katalogu wymaga jawnego katalogu źródłowego.",
+                ),
+            )
+        })?;
+        match std::fs::metadata(source_root) {
+            Ok(metadata) if metadata.is_dir() => {}
+            Ok(_) => {
+                return Err(recoverable_start_error(
+                    &service,
+                    &session_id,
+                    ImportCommandError::new(
+                        "sourceDirectoryMissing",
+                        "Wybrana ścieżka źródłowa nie jest katalogiem.",
+                    ),
+                ));
+            }
+            Err(error) => {
+                let command_error = match error.kind() {
+                    std::io::ErrorKind::PermissionDenied => ImportCommandError::new(
+                        "permissionDenied",
+                        "Brak uprawnień do odczytu katalogu źródłowego.",
+                    ),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotConnected => {
+                        ImportCommandError::new(
+                            "sourceDirectoryMissing",
+                            "Katalog źródłowy nie jest dostępny.",
+                        )
+                    }
+                    _ => ImportCommandError::new(
+                        "sourceUnavailable",
+                        format!("Nie można odczytać katalogu źródłowego: {error}"),
+                    ),
+                };
+                return Err(recoverable_start_error(
+                    &service,
+                    &session_id,
+                    command_error,
+                ));
+            }
+        }
+        if let Err(error) = service
             .manifest
             .validate_and_relink_session_source(&session_id, source_root)
-            .map_err(manifest_error)?;
+        {
+            let recoverable = matches!(
+                &error,
+                importer_manifest::ManifestError::SourceFileMissing(_)
+                    | importer_manifest::ManifestError::SourcePermissionDenied(_)
+            );
+            let error = manifest_error(error);
+            return Err(if recoverable {
+                recoverable_start_error(&service, &session_id, error)
+            } else {
+                error
+            });
+        }
     }
     let max_concurrent = settings
         .current_settings()
@@ -513,9 +585,17 @@ fn operation_belongs_to_root(
 
 #[cfg(test)]
 mod source_identity_tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
-    use super::operation_belongs_to_root;
+    use importer_manifest::{
+        ImportManifest, ImportSessionOperation, ImportSessionStatus, ManifestError,
+        NewImportSession,
+    };
+
+    use super::{
+        ImportCommandError, ImportService, manifest_error, operation_belongs_to_root,
+        recoverable_start_error,
+    };
 
     #[test]
     fn fallback_operation_does_not_move_to_a_colliding_mount() {
@@ -532,6 +612,50 @@ mod source_identity_tests {
             source_path,
             relative_path
         ));
+    }
+
+    #[test]
+    fn source_validation_errors_keep_actionable_command_codes_and_relative_paths() {
+        let missing = manifest_error(ManifestError::SourceFileMissing(PathBuf::from(
+            "DCIM/IMG.JPG",
+        )));
+        assert_eq!(missing.code, "sourceFileMissing");
+        assert!(missing.message.contains("DCIM/IMG.JPG"));
+
+        let denied = manifest_error(ManifestError::SourcePermissionDenied(PathBuf::from(
+            "PRIVATE/IMG.JPG",
+        )));
+        assert_eq!(denied.code, "permissionDenied");
+        assert!(denied.message.contains("PRIVATE/IMG.JPG"));
+    }
+
+    #[test]
+    fn recoverable_start_failure_updates_the_existing_session() {
+        let directory = tempfile::tempdir().unwrap();
+        let manifest = ImportManifest::open(directory.path().join("manifest.sqlite3")).unwrap();
+        let service = ImportService::new(manifest.clone());
+        let session = manifest
+            .create_import_session(&NewImportSession {
+                operation: ImportSessionOperation::Copy,
+                library_root: directory.path().join("library"),
+                source_fingerprint: None,
+                source_identity: None,
+                move_confirmed: false,
+                operations: Vec::new(),
+            })
+            .unwrap();
+
+        let returned = recoverable_start_error(
+            &service,
+            &session.id,
+            ImportCommandError::new("sourceDirectoryMissing", "folder unavailable"),
+        );
+
+        assert_eq!(returned.code, "sourceDirectoryMissing");
+        let persisted = manifest.get_import_session(&session.id).unwrap().unwrap();
+        assert_eq!(persisted.id, session.id);
+        assert_eq!(persisted.status, ImportSessionStatus::FailedRecoverable);
+        assert_eq!(persisted.last_error.as_deref(), Some("folder unavailable"));
     }
 }
 
@@ -551,10 +675,43 @@ fn get_session(service: &ImportService, id: &str) -> Result<ImportSession, Impor
 }
 
 fn manifest_error(error: importer_manifest::ManifestError) -> ImportCommandError {
-    ImportCommandError::new(
-        "importManifestFailed",
-        format!("Błąd historii importu: {error}"),
-    )
+    match error {
+        importer_manifest::ManifestError::SourceFileMissing(relative_path) => {
+            ImportCommandError::new(
+                "sourceFileMissing",
+                format!(
+                    "Brak oczekiwanego pliku źródłowego: {}",
+                    relative_path.display()
+                ),
+            )
+        }
+        importer_manifest::ManifestError::SourcePermissionDenied(relative_path) => {
+            ImportCommandError::new(
+                "permissionDenied",
+                format!(
+                    "Brak uprawnień do odczytu pliku źródłowego: {}",
+                    relative_path.display()
+                ),
+            )
+        }
+        error => ImportCommandError::new(
+            "importManifestFailed",
+            format!("Błąd historii importu: {error}"),
+        ),
+    }
+}
+
+fn recoverable_start_error(
+    service: &ImportService,
+    session_id: &str,
+    error: ImportCommandError,
+) -> ImportCommandError {
+    let _ = service.manifest.mark_session_status(
+        session_id,
+        ImportSessionStatus::FailedRecoverable,
+        Some(&error.message),
+    );
+    error
 }
 
 fn media_kind_name(kind: MediaFileKind) -> &'static str {
